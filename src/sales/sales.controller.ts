@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import { SalesService } from './sales.service';
 import { CreateSaleDto } from './dto/create-sale.dto';
+import { Roles } from '../auth/decorators/roles.decorator';
 
 /**
  * @controller SalesController
@@ -30,6 +31,8 @@ export class SalesController {
    * @description Record a complete sale. Deducts stock automatically.
    * @body {CreateSaleDto} dto - { userId, items: [{productId, quantity}] }
    */
+  // STAFF allowed — cashier creates sales
+  @Roles('OWNER', 'STAFF')
   @Post()
   create(
     @Param('shopId', ParseIntPipe) shopId: number,
@@ -38,21 +41,15 @@ export class SalesController {
     return this.salesService.create(shopId, dto);
   }
 
-  /**
-   * @route GET /shops/:shopId/sales
-   * @description List all sales for this shop, newest first.
-   */
+  // OWNER only — only owner views full sales history/reports
+  @Roles('OWNER')
   @Get()
   findAll(@Param('shopId', ParseIntPipe) shopId: number) {
     return this.salesService.findAllByShop(shopId);
   }
 
-  /**
-   * @route GET /shops/:shopId/sales/daily?date=YYYY-MM-DD
-   * @description Get total sales for a specific date.
-   * Used by Phase 4 (Daily Balance).
-   * @query {string} date - The date to summarize, e.g. "2026-02-12"
-   */
+  // OWNER only — daily summary for balance closing
+  @Roles('OWNER')
   @Get('daily')
   getDailySummary(
     @Param('shopId', ParseIntPipe) shopId: number,
@@ -62,10 +59,8 @@ export class SalesController {
     return this.salesService.getDailySummary(shopId, today);
   }
 
-  /**
-   * @route GET /shops/:shopId/sales/:id
-   * @description Get a full receipt with all item details.
-   */
+  // OWNER only — receipt details are financial records
+  @Roles('OWNER')
   @Get(':id')
   findOne(
     @Param('shopId', ParseIntPipe) shopId: number,

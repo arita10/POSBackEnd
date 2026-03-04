@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import { AdminService } from './admin.service';
 import { CreateShopWithOwnerDto } from './dto/create-shop-with-owner.dto';
+import { Public } from '../auth/decorators/public.decorator';
 
 /**
  * @controller AdminController
@@ -25,6 +26,7 @@ import { CreateShopWithOwnerDto } from './dto/create-shop-with-owner.dto';
  *   POST /admin/shops/:shopId/staff              → Add staff user to a shop
  *   POST /admin/users/:userId/reset-password     → Reset any user's password
  */
+@Public() // Admin routes use x-admin-key header instead of JWT
 @Controller('admin')
 export class AdminController {
   constructor(private readonly adminService: AdminService) {}

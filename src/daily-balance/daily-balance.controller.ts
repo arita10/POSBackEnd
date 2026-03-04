@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import { DailyBalanceService } from './daily-balance.service';
 import { CloseDayDto } from './dto/close-day.dto';
+import { Roles } from '../auth/decorators/roles.decorator';
 
 /**
  * @controller DailyBalanceController
@@ -21,6 +22,7 @@ import { CloseDayDto } from './dto/close-day.dto';
  *   GET  /shops/:shopId/daily-balance                → History of all balance records
  *   GET  /shops/:shopId/daily-balance/:id            → Single balance record
  */
+@Roles('OWNER') // Daily balance is OWNER only
 @Controller('shops/:shopId/daily-balance')
 export class DailyBalanceController {
   constructor(private readonly dailyBalanceService: DailyBalanceService) {}

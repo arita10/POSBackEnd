@@ -12,6 +12,7 @@ import {
 import { ExpensesService } from './expenses.service';
 import { CreateExpenseDto } from './dto/create-expense.dto';
 import { UpdateExpenseDto } from './dto/update-expense.dto';
+import { Roles } from '../auth/decorators/roles.decorator';
 
 /**
  * @controller ExpensesController
@@ -26,6 +27,7 @@ import { UpdateExpenseDto } from './dto/update-expense.dto';
  *   PUT    /shops/:shopId/expenses/:id         → Update an expense
  *   DELETE /shops/:shopId/expenses/:id         → Delete an expense
  */
+@Roles('OWNER') // All expense routes are OWNER only
 @Controller('shops/:shopId/expenses')
 export class ExpensesController {
   constructor(private readonly expensesService: ExpensesService) {}

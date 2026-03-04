@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import { UsersService } from './users.service';
 import { CreateUserDto } from './dto/create-user.dto';
+import { Roles } from '../auth/decorators/roles.decorator';
 import { UpdateUserDto } from './dto/update-user.dto';
 
 /**
@@ -28,6 +29,7 @@ import { UpdateUserDto } from './dto/update-user.dto';
  *   PUT    /shops/:shopId/users/:id      → Update a user in this shop
  *   DELETE /shops/:shopId/users/:id      → Delete a user from this shop
  */
+@Roles('OWNER') // Only owner manages users
 @Controller('shops/:shopId/users')
 export class UsersController {
   constructor(private readonly usersService: UsersService) {}

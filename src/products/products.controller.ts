@@ -12,6 +12,7 @@ import { ProductsService } from './products.service';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { AdjustStockDto } from './dto/adjust-stock.dto';
+import { Roles } from '../auth/decorators/roles.decorator';
 
 /**
  * @controller ProductsController
@@ -35,6 +36,8 @@ export class ProductsController {
    * @description Add a new product to the shop's inventory.
    * @body {CreateProductDto} dto - { unitId, barcode?, productName, salePrice, stockQuantity? }
    */
+  // OWNER only — staff cannot add products
+  @Roles('OWNER')
   @Post()
   create(
     @Param('shopId', ParseIntPipe) shopId: number,
@@ -43,19 +46,15 @@ export class ProductsController {
     return this.productsService.create(shopId, dto);
   }
 
-  /**
-   * @route GET /shops/:shopId/products
-   * @description List all products in the shop's inventory.
-   */
+  // STAFF allowed — staff needs to see product list to make sales
+  @Roles('OWNER', 'STAFF')
   @Get()
   findAll(@Param('shopId', ParseIntPipe) shopId: number) {
     return this.productsService.findAllByShop(shopId);
   }
 
-  /**
-   * @route GET /shops/:shopId/products/:id
-   * @description Get a single product with its unit and price comparisons.
-   */
+  // STAFF allowed — staff needs product detail for sales screen
+  @Roles('OWNER', 'STAFF')
   @Get(':id')
   findOne(
     @Param('shopId', ParseIntPipe) shopId: number,
@@ -64,10 +63,8 @@ export class ProductsController {
     return this.productsService.findOne(shopId, id);
   }
 
-  /**
-   * @route PUT /shops/:shopId/products/:id
-   * @description Update product details (name, price, barcode, etc.)
-   */
+  // OWNER only — only owner can change prices/names
+  @Roles('OWNER')
   @Put(':id')
   update(
     @Param('shopId', ParseIntPipe) shopId: number,
@@ -77,16 +74,8 @@ export class ProductsController {
     return this.productsService.update(shopId, id, dto);
   }
 
-  /**
-   * @route POST /shops/:shopId/products/:id/adjust-stock
-   * @description Add or remove stock for a product.
-   * @body {AdjustStockDto} dto - { type: "add"|"remove", quantity: number }
-   *
-   * EXAMPLES:
-   *   New delivery:    { "type": "add",    "quantity": 24 }
-   *   Damaged goods:   { "type": "remove", "quantity": 2 }
-   *   KG delivery:     { "type": "add",    "quantity": 3.500 }
-   */
+  // OWNER only — only owner manages stock deliveries
+  @Roles('OWNER')
   @Post(':id/adjust-stock')
   adjustStock(
     @Param('shopId', ParseIntPipe) shopId: number,
@@ -96,10 +85,8 @@ export class ProductsController {
     return this.productsService.adjustStock(shopId, id, dto);
   }
 
-  /**
-   * @route DELETE /shops/:shopId/products/:id
-   * @description Delete a product from the inventory.
-   */
+  // OWNER only — only owner can delete products
+  @Roles('OWNER')
   @Delete(':id')
   remove(
     @Param('shopId', ParseIntPipe) shopId: number,
