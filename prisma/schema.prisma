@@ -1,0 +1,232 @@
+// ============================================================
+// POS Bakkal SaaS - Prisma Schema
+// Phase 1: Core Tenancy (Shops, Users, Permissions)
+// Phase 2: Stock & Inventory (ProductUnits, Products, PriceComparison)
+// Phase 3: Sales & Expenses (SalesTransaction, SalesItem, ExpenseItem)
+// Phase 4: Daily Balance (DailyBalanceRecord — Difference & Income Left formulas)
+// ============================================================
+// Every table that belongs to a shop MUST have a shopId field.
+// This is the foundation of multi-tenant data isolation.
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// SHOP - The Tenant (Ana Kiracı)
+// ============================================================
+model Shop {
+  id       Int        @id @default(autoincrement())
+  shopName String     @map("shop_name") @db.VarChar(100)
+  status   ShopStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  users                User[]
+  productUnits         ProductUnit[]
+  products             Product[]
+  salesTransactions    SalesTransaction[]
+  expenseItems         ExpenseItem[]
+  dailyBalanceRecords  DailyBalanceRecord[]
+
+  @@map("shops")
+}
+
+enum ShopStatus {
+  ACTIVE  @map("active")
+  EXPIRED @map("expired")
+
+  @@map("shop_status")
+}
+
+// ============================================================
+// USER
+// ============================================================
+model User {
+  id       Int      @id @default(autoincrement())
+  shopId   Int      @map("shop_id")
+  username String   @db.VarChar(50)
+  password String   @db.VarChar(255)
+  role     UserRole @default(STAFF)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  shop              Shop               @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  permission        Permission?
+  salesTransactions SalesTransaction[]
+
+  @@unique([shopId, username])
+  @@map("users")
+}
+
+enum UserRole {
+  OWNER @map("owner")
+  STAFF @map("staff")
+
+  @@map("user_role")
+}
+
+// ============================================================
+// PERMISSION
+// ============================================================
+model Permission {
+  id             Int     @id @default(autoincrement())
+  userId         Int     @unique @map("user_id")
+  canManageStock Boolean @default(false) @map("can_manage_stock")
+  canViewReports Boolean @default(false) @map("can_view_reports")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("permissions")
+}
+
+// ============================================================
+// PRODUCT UNIT - Measurement Type (Adet / KG)
+// ============================================================
+model ProductUnit {
+  id       Int    @id @default(autoincrement())
+  shopId   Int    @map("shop_id")
+  unitName String @map("unit_name") @db.VarChar(20)
+
+  shop     Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  products Product[]
+
+  @@unique([shopId, unitName])
+  @@map("product_units")
+}
+
+// ============================================================
+// PRODUCT - Items the Bakkal Sells
+// ============================================================
+// PRICING FIELDS:
+//   costPrice  = What the shop PAID to buy the product (alış fiyatı)
+//   salePrice  = What the customer PAYS at the counter (satış fiyatı)
+//   profit     = salePrice - costPrice (calculated in code, not stored)
+//
+// DECIMAL(10,2) for prices: max 99,999,999.99 TL
+// DECIMAL(10,3) for stock:  max 9,999,999.999 KG (3 decimals for grams)
+// ============================================================
+model Product {
+  id            Int     @id @default(autoincrement())
+  shopId        Int     @map("shop_id")
+  unitId        Int     @map("unit_id")
+  barcode       String? @db.VarChar(50)
+  productName   String  @map("product_name") @db.VarChar(100)
+  costPrice     Decimal @default(0) @map("cost_price") @db.Decimal(10, 2)
+  salePrice     Decimal @map("sale_price") @db.Decimal(10, 2)
+  stockQuantity Decimal @default(0) @map("stock_quantity") @db.Decimal(10, 3)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  shop             Shop                    @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  unit             ProductUnit             @relation(fields: [unitId], references: [id])
+  priceComparisons ProductPriceComparison[]
+  salesItems       SalesItem[]
+
+  @@unique([shopId, barcode])
+  @@map("products")
+}
+
+// ============================================================
+// PRODUCT PRICE COMPARISON - AI Price Intelligence
+// ============================================================
+model ProductPriceComparison {
+  id              Int      @id @default(autoincrement())
+  productId       Int      @map("product_id")
+  competitorName  String   @map("competitor_name") @db.VarChar(50)
+  competitorPrice Decimal  @map("competitor_price") @db.Decimal(10, 2)
+  lastUpdated     DateTime @default(now()) @map("last_updated")
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, competitorName])
+  @@map("product_price_comparison")
+}
+
+// ============================================================
+// SALES TRANSACTION - Receipt Header
+// ============================================================
+model SalesTransaction {
+  id         Int      @id @default(autoincrement())
+  shopId     Int      @map("shop_id")
+  userId     Int      @map("user_id")
+  totalPrice Decimal  @map("total_price") @db.Decimal(10, 2)
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  shop  Shop        @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  user  User        @relation(fields: [userId], references: [id])
+  items SalesItem[]
+
+  @@map("sales_transactions")
+}
+
+// ============================================================
+// SALES ITEM - Individual Product on a Receipt
+// ============================================================
+model SalesItem {
+  id            Int     @id @default(autoincrement())
+  transactionId Int     @map("transaction_id")
+  productId     Int     @map("product_id")
+  quantity      Decimal @db.Decimal(10, 3)
+  priceAtSale   Decimal @map("price_at_sale") @db.Decimal(10, 2)
+
+  transaction SalesTransaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  product     Product          @relation(fields: [productId], references: [id])
+
+  @@map("sales_items")
+}
+
+// ============================================================
+// EXPENSE ITEM - Business Expenses
+// ============================================================
+model ExpenseItem {
+  id              Int      @id @default(autoincrement())
+  shopId          Int      @map("shop_id")
+  vendorName      String   @map("vendor_name") @db.VarChar(100)
+  itemAmount      Decimal  @map("item_amount") @db.Decimal(10, 2)
+  expenseType     String   @map("expense_type") @db.VarChar(50)
+  transactionDate DateTime @default(now()) @map("transaction_date") @db.Date
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@map("expense_items")
+}
+
+// ============================================================
+// DAILY BALANCE RECORD - End of Day Accounting
+// ============================================================
+model DailyBalanceRecord {
+  id                 Int      @id @default(autoincrement())
+  shopId             Int      @map("shop_id")
+  recordDate         DateTime @map("record_date") @db.Date
+
+  yesterdayBalance   Decimal  @default(0) @map("yesterday_balance") @db.Decimal(10, 2)
+
+  cashCountManual    Decimal  @default(0) @map("cash_count_manual") @db.Decimal(10, 2)
+  creditCountManual  Decimal  @default(0) @map("credit_count_manual") @db.Decimal(10, 2)
+  debtCountManual    Decimal  @default(0) @map("debt_count_manual") @db.Decimal(10, 2)
+
+  totalSystemSelling Decimal  @default(0) @map("total_system_selling") @db.Decimal(10, 2)
+  totalExpenseSum    Decimal  @default(0) @map("total_expense_sum") @db.Decimal(10, 2)
+
+  incomeLeft         Decimal  @default(0) @map("income_left") @db.Decimal(10, 2)
+  difference         Decimal  @default(0) @map("difference") @db.Decimal(10, 2)
+
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@unique([shopId, recordDate])
+  @@map("daily_balance_records")
+}
