@@ -4,11 +4,12 @@ import { AppModule } from './app.module';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
-  // Allow frontend to call this backend from any origin during development.
-  // In production, replace '*' with your actual frontend domain:
-  // e.g. origin: 'https://mybakal.com'
+  // CORS: restrict which frontend domains can call this API.
+  // Set ALLOWED_ORIGIN in .env for production (e.g. https://mybakal.com).
+  // Falls back to '*' only if not set (development only).
+  const allowedOrigin = process.env.ALLOWED_ORIGIN ?? '*';
   app.enableCors({
-    origin: '*',
+    origin: allowedOrigin,
     methods: ['GET', 'POST', 'PUT', 'DELETE'],
   });
 

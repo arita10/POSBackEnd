@@ -6,6 +6,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
+import * as bcrypt from 'bcrypt';
 
 /**
  * @class UsersService
@@ -45,12 +46,14 @@ export class UsersService {
       );
     }
 
+    const hashedPassword = await bcrypt.hash(dto.password, 10);
+
     // Create user AND default permission in a single transaction
-    return this.prisma.user.create({
+    const user = await this.prisma.user.create({
       data: {
         shopId,
         username: dto.username,
-        password: dto.password, // TODO: Hash with bcrypt in Phase 2
+        password: hashedPassword,
         role: dto.role,
         permission: {
           create: {
@@ -61,6 +64,10 @@ export class UsersService {
       },
       include: { permission: true },
     });
+
+    // Never return the password hash in API responses
+    const { password: _pw, ...safeUser } = user;
+    return safeUser;
   }
 
   /**
@@ -130,15 +137,29 @@ export class UsersService {
   async update(shopId: number, userId: number, dto: UpdateUserDto) {
     await this.findOne(shopId, userId); // Ensure user exists in this shop
 
-    return this.prisma.user.update({
+    const updateData: any = {
+      ...(dto.username && { username: dto.username }),
+      ...(dto.role && { role: dto.role }),
+    };
+
+    if (dto.password) {
+      updateData.password = await bcrypt.hash(dto.password, 10);
+    }
+
+    const user = await this.prisma.user.update({
       where: { id: userId },
-      data: {
-        ...(dto.username && { username: dto.username }),
-        ...(dto.password && { password: dto.password }),
-        ...(dto.role && { role: dto.role }),
+      data: updateData,
+      select: {
+        id: true,
+        shopId: true,
+        username: true,
+        role: true,
+        updatedAt: true,
+        permission: true,
+        // password intentionally excluded
       },
-      include: { permission: true },
     });
+    return user;
   }
 
   /**
