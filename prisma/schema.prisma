@@ -2,11 +2,8 @@
 // POS Bakkal SaaS - Prisma Schema
 // Phase 1: Core Tenancy (Shops, Users, Permissions)
 // Phase 2: Stock & Inventory (ProductUnits, Products, PriceComparison)
-// Phase 3: Sales & Expenses (SalesTransaction, SalesItem, ExpenseItem)
-// Phase 4: Daily Balance (DailyBalanceRecord — Difference & Income Left formulas)
-// ============================================================
-// Every table that belongs to a shop MUST have a shopId field.
-// This is the foundation of multi-tenant data isolation.
+// Phase 3: Sales & Expenses (SalesTransaction, SalesItem, ExpenseItem, Vendor)
+// Phase 4: Daily Balance (DailyBalanceRecord — Devir, Fark formulas)
 // ============================================================
 
 generator client {
@@ -19,7 +16,7 @@ datasource db {
 }
 
 // ============================================================
-// SHOP - The Tenant (Ana Kiracı)
+// SHOP - The Tenant
 // ============================================================
 model Shop {
   id       Int        @id @default(autoincrement())
@@ -29,12 +26,13 @@ model Shop {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  users                User[]
-  productUnits         ProductUnit[]
-  products             Product[]
-  salesTransactions    SalesTransaction[]
-  expenseItems         ExpenseItem[]
-  dailyBalanceRecords  DailyBalanceRecord[]
+  users               User[]
+  productUnits        ProductUnit[]
+  products            Product[]
+  salesTransactions   SalesTransaction[]
+  expenseItems        ExpenseItem[]
+  vendors             Vendor[]
+  dailyBalanceRecords DailyBalanceRecord[]
 
   @@map("shops")
 }
@@ -104,15 +102,7 @@ model ProductUnit {
 }
 
 // ============================================================
-// PRODUCT - Items the Bakkal Sells
-// ============================================================
-// PRICING FIELDS:
-//   costPrice  = What the shop PAID to buy the product (alış fiyatı)
-//   salePrice  = What the customer PAYS at the counter (satış fiyatı)
-//   profit     = salePrice - costPrice (calculated in code, not stored)
-//
-// DECIMAL(10,2) for prices: max 99,999,999.99 TL
-// DECIMAL(10,3) for stock:  max 9,999,999.999 KG (3 decimals for grams)
+// PRODUCT
 // ============================================================
 model Product {
   id            Int     @id @default(autoincrement())
@@ -127,8 +117,8 @@ model Product {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  shop             Shop                    @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  unit             ProductUnit             @relation(fields: [unitId], references: [id])
+  shop             Shop                     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  unit             ProductUnit              @relation(fields: [unitId], references: [id])
   priceComparisons ProductPriceComparison[]
   salesItems       SalesItem[]
 
@@ -137,7 +127,7 @@ model Product {
 }
 
 // ============================================================
-// PRODUCT PRICE COMPARISON - AI Price Intelligence
+// PRODUCT PRICE COMPARISON
 // ============================================================
 model ProductPriceComparison {
   id              Int      @id @default(autoincrement())
@@ -170,7 +160,7 @@ model SalesTransaction {
 }
 
 // ============================================================
-// SALES ITEM - Individual Product on a Receipt
+// SALES ITEM - Line Item on a Receipt
 // ============================================================
 model SalesItem {
   id            Int     @id @default(autoincrement())
@@ -186,11 +176,34 @@ model SalesItem {
 }
 
 // ============================================================
+// VENDOR - Reusable vendor list per shop (user-managed)
+// ============================================================
+model Vendor {
+  id         Int    @id @default(autoincrement())
+  shopId     Int    @map("shop_id")
+  vendorName String @map("vendor_name") @db.VarChar(100)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  shop     Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  expenses ExpenseItem[]
+
+  @@unique([shopId, vendorName])
+  @@map("vendors")
+}
+
+// ============================================================
 // EXPENSE ITEM - Business Expenses
+//
+// Expense types:
+//   kasa_gider  = cash expense paid from register (reduces incomeLeft)
+//   devir_gider = carry-over deduction (reduces devir balance day-by-day)
+//   kart_gider  = card/bank expense (reduces incomeLeft but not cash)
 // ============================================================
 model ExpenseItem {
   id              Int      @id @default(autoincrement())
   shopId          Int      @map("shop_id")
+  vendorId        Int?     @map("vendor_id")
   vendorName      String   @map("vendor_name") @db.VarChar(100)
   itemAmount      Decimal  @map("item_amount") @db.Decimal(10, 2)
   expenseType     String   @map("expense_type") @db.VarChar(50)
@@ -198,29 +211,52 @@ model ExpenseItem {
 
   createdAt DateTime @default(now()) @map("created_at")
 
-  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  shop   Shop    @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  vendor Vendor? @relation(fields: [vendorId], references: [id], onDelete: SetNull)
 
   @@map("expense_items")
 }
 
 // ============================================================
 // DAILY BALANCE RECORD - End of Day Accounting
+//
+// Formula 1 — Devir Kalan:
+//   devirKalan = dunDevir - totalDevirGider
+//
+// Formula 2 — Beklenen Kasa (incomeLeft):
+//   incomeLeft = totalSystemSelling - totalKasaGider - totalKartGider + devirKalan
+//
+// Formula 3 — Fark:
+//   fark = (kasaNakit + krediler + verisiye) - incomeLeft
 // ============================================================
 model DailyBalanceRecord {
   id                 Int      @id @default(autoincrement())
   shopId             Int      @map("shop_id")
   recordDate         DateTime @map("record_date") @db.Date
 
-  yesterdayBalance   Decimal  @default(0) @map("yesterday_balance") @db.Decimal(10, 2)
+  // Owner inputs previous day carry balance
+  dunDevir           Decimal  @default(0) @map("dun_devir") @db.Decimal(10, 2)
 
-  cashCountManual    Decimal  @default(0) @map("cash_count_manual") @db.Decimal(10, 2)
-  creditCountManual  Decimal  @default(0) @map("credit_count_manual") @db.Decimal(10, 2)
-  debtCountManual    Decimal  @default(0) @map("debt_count_manual") @db.Decimal(10, 2)
-
-  totalSystemSelling Decimal  @default(0) @map("total_system_selling") @db.Decimal(10, 2)
+  // System-totalled expense per type
+  totalKasaGider     Decimal  @default(0) @map("total_kasa_gider") @db.Decimal(10, 2)
+  totalDevirGider    Decimal  @default(0) @map("total_devir_gider") @db.Decimal(10, 2)
+  totalKartGider     Decimal  @default(0) @map("total_kart_gider") @db.Decimal(10, 2)
   totalExpenseSum    Decimal  @default(0) @map("total_expense_sum") @db.Decimal(10, 2)
 
+  totalSystemSelling Decimal  @default(0) @map("total_system_selling") @db.Decimal(10, 2)
+
+  // Formula 1
+  devirKalan         Decimal  @default(0) @map("devir_kalan") @db.Decimal(10, 2)
+
+  // Owner manual counts
+  kasaNakit          Decimal  @default(0) @map("kasa_nakit") @db.Decimal(10, 2)
+  krediler           Decimal  @default(0) @map("krediler") @db.Decimal(10, 2)
+  verisiye           Decimal  @default(0) @map("verisiye") @db.Decimal(10, 2)
+
+  // Formula 2
   incomeLeft         Decimal  @default(0) @map("income_left") @db.Decimal(10, 2)
+
+  // Formula 3
   difference         Decimal  @default(0) @map("difference") @db.Decimal(10, 2)
 
   createdAt          DateTime @default(now()) @map("created_at")

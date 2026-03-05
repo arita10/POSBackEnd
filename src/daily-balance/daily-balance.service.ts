@@ -1,200 +1,111 @@
-import {
-  Injectable,
-  NotFoundException,
-  ConflictException,
-} from '@nestjs/common';
+import { Injectable, NotFoundException, ConflictException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { ExpensesService } from '../expenses/expenses.service';
 import { Decimal } from '@prisma/client/runtime/library';
 import { CloseDayDto } from './dto/close-day.dto';
 
 /**
- * @class DailyBalanceService
- * @description Implements the core accounting formulas for the Bakkal POS.
+ * DailyBalanceService — core accounting formulas:
  *
- * ╔══════════════════════════════════════════════════════════════╗
- * ║  THE TWO FORMULAS (The heart of this entire system)         ║
- * ║                                                              ║
- * ║  Income Left (Devir) =                                      ║
- * ║    totalSystemSelling - totalExpenseSum + yesterdayBalance   ║
- * ║                                                              ║
- * ║  Difference (Fark) =                                        ║
- * ║    (cashCountManual + creditCountManual + debtCountManual)   ║
- * ║    - incomeLeft                                              ║
- * ╚══════════════════════════════════════════════════════════════╝
+ *   Formula 1 — Devir Kalan:
+ *     devirKalan = dunDevir - totalDevirGider
+ *
+ *   Formula 2 — Beklenen Kasa (incomeLeft):
+ *     incomeLeft = totalSystemSelling - totalKasaGider - totalKartGider + devirKalan
+ *
+ *   Formula 3 — Fark:
+ *     fark = (kasaNakit + krediler + verisiye) - incomeLeft
  */
 @Injectable()
 export class DailyBalanceService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly expensesService: ExpensesService,
+  ) {}
 
-  /**
-   * @function preview
-   * @description Shows what the daily balance WILL look like before closing.
-   * The owner can see the system totals and enter their manual counts
-   * to preview the difference — without saving anything yet.
-   *
-   * FLOW: Owner opens the app → sees today's system totals →
-   *       enters their manual counts → previews the result →
-   *       if happy, confirms with closeDay()
-   *
-   * @param {number} shopId - The shop to preview for.
-   * @param {string} date - The date to preview "YYYY-MM-DD".
-   * @returns {Promise<Object>} System totals and yesterday's balance.
-   */
-  async preview(shopId: number, date: string) {
-    // Get today's total system sales
-    const startOfDay = new Date(`${date}T00:00:00.000Z`);
-    const endOfDay = new Date(`${date}T23:59:59.999Z`);
+  async preview(shopId: number, date: string, dunDevir = 0) {
+    const start = new Date(date + 'T00:00:00.000Z');
+    const end   = new Date(date + 'T23:59:59.999Z');
 
-    const [salesResult, expenseResult, yesterdayRecord] = await Promise.all([
-      // Sum all sales for today
+    const [salesResult, expTotals] = await Promise.all([
       this.prisma.salesTransaction.aggregate({
-        where: { shopId, createdAt: { gte: startOfDay, lte: endOfDay } },
+        where: { shopId, createdAt: { gte: start, lte: end } },
         _sum: { totalPrice: true },
         _count: true,
       }),
-      // Sum all expenses for today
-      this.prisma.expenseItem.aggregate({
-        where: { shopId, transactionDate: { gte: startOfDay, lte: endOfDay } },
-        _sum: { itemAmount: true },
-        _count: true,
-      }),
-      // Get previous day's incomeLeft as today's yesterdayBalance
-      this.prisma.dailyBalanceRecord.findFirst({
-        where: {
-          shopId,
-          recordDate: { lt: startOfDay },
-        },
-        orderBy: { recordDate: 'desc' },
-        select: { incomeLeft: true, recordDate: true },
-      }),
+      this.expensesService.getDailyTotalByType(shopId, date),
     ]);
 
-    const totalSystemSelling = new Decimal(
-      salesResult._sum.totalPrice?.toString() ?? '0',
-    );
-    const totalExpenseSum = new Decimal(
-      expenseResult._sum.itemAmount?.toString() ?? '0',
-    );
-    const yesterdayBalance = new Decimal(
-      yesterdayRecord?.incomeLeft?.toString() ?? '0',
-    );
+    const totalSystemSelling = new Decimal(salesResult._sum.totalPrice?.toString() ?? '0');
+    const totalKasaGider     = new Decimal(expTotals.totalKasaGider);
+    const totalDevirGider    = new Decimal(expTotals.totalDevirGider);
+    const totalKartGider     = new Decimal(expTotals.totalKartGider);
+    const totalExpenseSum    = new Decimal(expTotals.totalExpenses);
+    const dunDevirDec        = new Decimal(dunDevir);
 
-    // Calculate Income Left (what SHOULD be in drawer)
-    const incomeLeft = totalSystemSelling
-      .minus(totalExpenseSum)
-      .plus(yesterdayBalance);
+    const devirKalan = dunDevirDec.minus(totalDevirGider);
+    const incomeLeft = totalSystemSelling.minus(totalKasaGider).minus(totalKartGider).plus(devirKalan);
 
     return {
       date,
-      totalSystemSelling: totalSystemSelling.toFixed(2),
-      totalExpenseSum: totalExpenseSum.toFixed(2),
-      yesterdayBalance: yesterdayBalance.toFixed(2),
+      dunDevir:              dunDevirDec.toFixed(2),
+      totalSystemSelling:    totalSystemSelling.toFixed(2),
+      totalKasaGider:        totalKasaGider.toFixed(2),
+      totalDevirGider:       totalDevirGider.toFixed(2),
+      totalKartGider:        totalKartGider.toFixed(2),
+      totalExpenseSum:       totalExpenseSum.toFixed(2),
+      devirKalan:            devirKalan.toFixed(2),
+      projectedIncomeLeft:   incomeLeft.toFixed(2),
       salesTransactionCount: salesResult._count,
-      expenseCount: expenseResult._count,
-      projectedIncomeLeft: incomeLeft.toFixed(2),
-      tip: 'Enter your manual counts to see the Difference',
+      expenseCount:          expTotals.expenseCount,
     };
   }
 
-  /**
-   * @function closeDay
-   * @description Closes the day by recording the final balance.
-   * This is the OFFICIAL end-of-day action. Calculates and stores
-   * both the Difference and Income Left formulas permanently.
-   *
-   * BUSINESS RULES:
-   *   1. Can only be done ONCE per day (@@unique[shopId, recordDate])
-   *   2. System fetches sales & expense totals automatically
-   *   3. yesterdayBalance comes from the previous day's incomeLeft
-   *   4. Both formulas are calculated server-side (tamper-proof)
-   *   5. incomeLeft is stored and will become NEXT day's yesterdayBalance
-   *
-   * @param {number} shopId - The shop closing its day.
-   * @param {CloseDayDto} dto - Owner's manual count { cashCountManual, creditCountManual, debtCountManual }
-   * @returns {Promise<DailyBalanceRecord>} The saved balance record with all calculations.
-   * @throws {ConflictException} If this day has already been closed.
-   */
   async closeDay(shopId: number, dto: CloseDayDto) {
-    const date = dto.recordDate;
-    const startOfDay = new Date(`${date}T00:00:00.000Z`);
-    const endOfDay = new Date(`${date}T23:59:59.999Z`);
+    const date  = dto.recordDate;
+    const start = new Date(date + 'T00:00:00.000Z');
+    const end   = new Date(date + 'T23:59:59.999Z');
 
-    // Check: has this day already been closed?
-    const existing = await this.prisma.dailyBalanceRecord.findFirst({
-      where: { shopId, recordDate: startOfDay },
-    });
+    const existing = await this.prisma.dailyBalanceRecord.findFirst({ where: { shopId, recordDate: start } });
+    if (existing) throw new ConflictException('Day ' + date + ' has already been closed.');
 
-    if (existing) {
-      throw new ConflictException(
-        `Day ${date} has already been closed. Use the history endpoint to view it.`,
-      );
-    }
-
-    // ── Fetch all required data in parallel (efficient) ──
-    const [salesResult, expenseResult, yesterdayRecord] = await Promise.all([
+    const [salesResult, expTotals] = await Promise.all([
       this.prisma.salesTransaction.aggregate({
-        where: { shopId, createdAt: { gte: startOfDay, lte: endOfDay } },
+        where: { shopId, createdAt: { gte: start, lte: end } },
         _sum: { totalPrice: true },
       }),
-      this.prisma.expenseItem.aggregate({
-        where: { shopId, transactionDate: { gte: startOfDay, lte: endOfDay } },
-        _sum: { itemAmount: true },
-      }),
-      this.prisma.dailyBalanceRecord.findFirst({
-        where: { shopId, recordDate: { lt: startOfDay } },
-        orderBy: { recordDate: 'desc' },
-        select: { incomeLeft: true },
-      }),
+      this.expensesService.getDailyTotalByType(shopId, date),
     ]);
 
-    // ── Build Decimal values for precise calculation ──
-    const totalSystemSelling = new Decimal(
-      salesResult._sum.totalPrice?.toString() ?? '0',
-    );
-    const totalExpenseSum = new Decimal(
-      expenseResult._sum.itemAmount?.toString() ?? '0',
-    );
-    const yesterdayBalance = new Decimal(
-      yesterdayRecord?.incomeLeft?.toString() ?? '0',
-    );
-    const cashCount = new Decimal(dto.cashCountManual);
-    const creditCount = new Decimal(dto.creditCountManual);
-    const debtCount = new Decimal(dto.debtCountManual);
+    const totalSystemSelling = new Decimal(salesResult._sum.totalPrice?.toString() ?? '0');
+    const totalKasaGider     = new Decimal(expTotals.totalKasaGider);
+    const totalDevirGider    = new Decimal(expTotals.totalDevirGider);
+    const totalKartGider     = new Decimal(expTotals.totalKartGider);
+    const totalExpenseSum    = new Decimal(expTotals.totalExpenses);
+    const dunDevirDec        = new Decimal(dto.dunDevir ?? 0);
+    const kasaNakit          = new Decimal(dto.kasaNakit ?? 0);
+    const krediler           = new Decimal(dto.krediler ?? 0);
+    const verisiye           = new Decimal(dto.verisiye ?? 0);
 
-    // ══════════════════════════════════════════════════
-    // FORMULA 1: Income Left (Devir)
-    // What the system says SHOULD be in the drawer.
-    // This becomes tomorrow's yesterdayBalance.
-    //
-    // incomeLeft = totalSystemSelling - totalExpenseSum + yesterdayBalance
-    // ══════════════════════════════════════════════════
-    const incomeLeft = totalSystemSelling
-      .minus(totalExpenseSum)
-      .plus(yesterdayBalance);
+    const devirKalan  = dunDevirDec.minus(totalDevirGider);
+    const incomeLeft  = totalSystemSelling.minus(totalKasaGider).minus(totalKartGider).plus(devirKalan);
+    const manualTotal = kasaNakit.plus(krediler).plus(verisiye);
+    const difference  = manualTotal.minus(incomeLeft);
 
-    // ══════════════════════════════════════════════════
-    // FORMULA 2: Difference (Fark)
-    // How far the owner's physical count deviates from
-    // what the system expects.
-    //
-    // difference = (cashCount + creditCount + debtCount) - incomeLeft
-    // Positive = SURPLUS (owner has more cash than expected)
-    // Negative = DEFICIT (money is missing)
-    // ══════════════════════════════════════════════════
-    const manualTotal = cashCount.plus(creditCount).plus(debtCount);
-    const difference = manualTotal.minus(incomeLeft);
-
-    // ── Save everything permanently ──
     const record = await this.prisma.dailyBalanceRecord.create({
       data: {
         shopId,
-        recordDate: startOfDay,
-        yesterdayBalance,
-        cashCountManual: cashCount,
-        creditCountManual: creditCount,
-        debtCountManual: debtCount,
-        totalSystemSelling,
+        recordDate:         start,
+        dunDevir:           dunDevirDec,
+        totalKasaGider,
+        totalDevirGider,
+        totalKartGider,
         totalExpenseSum,
+        totalSystemSelling,
+        devirKalan,
+        kasaNakit,
+        krediler,
+        verisiye,
         incomeLeft,
         difference,
       },
@@ -202,13 +113,6 @@ export class DailyBalanceService {
     return this.serializeRecord(record);
   }
 
-  /**
-   * @function findAll
-   * @description Lists all daily balance records for a shop (history).
-   * TENANCY: Only returns records WHERE shopId matches.
-   * @param {number} shopId - The shop to get history for.
-   * @returns {Promise<DailyBalanceRecord[]>} All balance records, newest first.
-   */
   async findAll(shopId: number) {
     const records = await this.prisma.dailyBalanceRecord.findMany({
       where: { shopId },
@@ -217,42 +121,91 @@ export class DailyBalanceService {
     return records.map((r) => this.serializeRecord(r));
   }
 
-  /**
-   * @function findOne
-   * @description Retrieves a single day's balance record.
-   * @param {number} shopId - The shop the record must belong to.
-   * @param {number} id - The record's unique identifier.
-   * @returns {Promise<DailyBalanceRecord>} The balance record.
-   * @throws {NotFoundException} If record not found in this shop.
-   */
   async findOne(shopId: number, id: number) {
-    const record = await this.prisma.dailyBalanceRecord.findFirst({
-      where: { id, shopId },
-    });
+    const record = await this.prisma.dailyBalanceRecord.findFirst({ where: { id, shopId } });
+    if (!record) throw new NotFoundException('Record ' + id + ' not found');
+    return this.serializeRecord(record);
+  }
 
-    if (!record) {
-      throw new NotFoundException(
-        `Daily balance record with ID ${id} not found in shop ${shopId}`,
-      );
+  async getReport(shopId: number, period: string, date: string) {
+    const pivot = new Date(date + 'T00:00:00.000Z');
+    let start: Date;
+    let end: Date;
+
+    if (period === 'daily') {
+      start = pivot;
+      end   = new Date(date + 'T23:59:59.999Z');
+    } else if (period === 'weekly') {
+      const day  = pivot.getUTCDay();
+      const diff = day === 0 ? -6 : 1 - day;
+      start = new Date(pivot);
+      start.setUTCDate(pivot.getUTCDate() + diff);
+      end = new Date(start);
+      end.setUTCDate(start.getUTCDate() + 6);
+      end.setUTCHours(23, 59, 59, 999);
+    } else {
+      start = new Date(Date.UTC(pivot.getUTCFullYear(), pivot.getUTCMonth(), 1));
+      end   = new Date(Date.UTC(pivot.getUTCFullYear(), pivot.getUTCMonth() + 1, 0, 23, 59, 59, 999));
     }
 
-    return this.serializeRecord(record);
+    const records = await this.prisma.dailyBalanceRecord.findMany({
+      where: { shopId, recordDate: { gte: start, lte: end } },
+      orderBy: { recordDate: 'asc' },
+    });
+
+    const serialized = records.map((r) => this.serializeRecord(r));
+
+    let totalSelling    = new Decimal(0);
+    let totalKasaGider  = new Decimal(0);
+    let totalDevirGider = new Decimal(0);
+    let totalKartGider  = new Decimal(0);
+    let totalExpense    = new Decimal(0);
+    let totalProfit     = new Decimal(0);
+
+    for (const r of records) {
+      const s = new Decimal(r.totalSystemSelling.toString());
+      const e = new Decimal(r.totalExpenseSum.toString());
+      totalSelling    = totalSelling.add(s);
+      totalKasaGider  = totalKasaGider.add(new Decimal(r.totalKasaGider.toString()));
+      totalDevirGider = totalDevirGider.add(new Decimal(r.totalDevirGider.toString()));
+      totalKartGider  = totalKartGider.add(new Decimal(r.totalKartGider.toString()));
+      totalExpense    = totalExpense.add(e);
+      totalProfit     = totalProfit.add(s.minus(e));
+    }
+
+    return {
+      period,
+      from:               start.toISOString().slice(0, 10),
+      to:                 end.toISOString().slice(0, 10),
+      daysClosed:         records.length,
+      totalSystemSelling: totalSelling.toFixed(2),
+      totalKasaGider:     totalKasaGider.toFixed(2),
+      totalDevirGider:    totalDevirGider.toFixed(2),
+      totalKartGider:     totalKartGider.toFixed(2),
+      totalExpenseSum:    totalExpense.toFixed(2),
+      netProfit:          totalProfit.toFixed(2),
+      records:            serialized,
+    };
   }
 
   private serializeRecord(r: any) {
     return {
-      id: r.id,
-      shopId: r.shopId,
-      recordDate: r.recordDate?.toISOString(),
-      yesterdayBalance: r.yesterdayBalance?.toString() ?? '0',
-      cashCountManual: r.cashCountManual?.toString() ?? '0',
-      creditCountManual: r.creditCountManual?.toString() ?? '0',
-      debtCountManual: r.debtCountManual?.toString() ?? '0',
+      id:                 r.id,
+      shopId:             r.shopId,
+      recordDate:         r.recordDate?.toISOString().slice(0, 10),
+      dunDevir:           r.dunDevir?.toString() ?? '0',
+      totalKasaGider:     r.totalKasaGider?.toString() ?? '0',
+      totalDevirGider:    r.totalDevirGider?.toString() ?? '0',
+      totalKartGider:     r.totalKartGider?.toString() ?? '0',
+      totalExpenseSum:    r.totalExpenseSum?.toString() ?? '0',
       totalSystemSelling: r.totalSystemSelling?.toString() ?? '0',
-      totalExpenseSum: r.totalExpenseSum?.toString() ?? '0',
-      incomeLeft: r.incomeLeft?.toString() ?? '0',
-      difference: r.difference?.toString() ?? '0',
-      createdAt: r.createdAt?.toISOString(),
+      devirKalan:         r.devirKalan?.toString() ?? '0',
+      kasaNakit:          r.kasaNakit?.toString() ?? '0',
+      krediler:           r.krediler?.toString() ?? '0',
+      verisiye:           r.verisiye?.toString() ?? '0',
+      incomeLeft:         r.incomeLeft?.toString() ?? '0',
+      difference:         r.difference?.toString() ?? '0',
+      createdAt:          r.createdAt?.toISOString(),
     };
   }
 }

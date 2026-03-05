@@ -1,13 +1,10 @@
 import { Module } from '@nestjs/common';
 import { DailyBalanceController } from './daily-balance.controller';
 import { DailyBalanceService } from './daily-balance.service';
+import { ExpensesModule } from '../expenses/expenses.module';
 
-/**
- * @module DailyBalanceModule
- * @description Feature module for daily balance calculations.
- * Implements the Difference and Income Left (Devir) formulas.
- */
 @Module({
+  imports: [ExpensesModule],
   controllers: [DailyBalanceController],
   providers: [DailyBalanceService],
   exports: [DailyBalanceService],

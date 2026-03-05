@@ -1,9 +1,6 @@
-/**
- * @description DTO for updating an existing expense record.
- * All fields are optional.
- */
 export class UpdateExpenseDto {
   vendorName?: string;
+  vendorId?: number;
   itemAmount?: number;
   expenseType?: string;
   transactionDate?: string;
