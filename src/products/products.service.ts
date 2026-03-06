@@ -226,6 +226,16 @@ export class ProductsService {
   async remove(shopId: number, productId: number) {
     await this.findOne(shopId, productId);
 
+    const salesCount = await this.prisma.salesItem.count({
+      where: { productId },
+    });
+
+    if (salesCount > 0) {
+      throw new BadRequestException(
+        `Bu ürün ${salesCount} satış kaydında kullanılmış ve silinemez.`,
+      );
+    }
+
     const deleted = await this.prisma.product.delete({
       where: { id: productId },
     });
