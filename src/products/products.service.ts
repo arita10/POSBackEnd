@@ -50,19 +50,29 @@ export class ProductsService {
       );
     }
 
-    const created = await this.prisma.product.create({
-      data: {
-        shopId,
-        unitId: dto.unitId,
-        barcode: dto.barcode || null,
-        productName: dto.productName,
-        costPrice: Number.isFinite(dto.costPrice) ? dto.costPrice : 0,
-        salePrice: dto.salePrice,
-        stockQuantity: Number.isFinite(dto.stockQuantity) ? dto.stockQuantity : 0,
-      },
-      include: { unit: true },
-    });
-    return this.serializeProduct(created);
+    try {
+      const created = await this.prisma.product.create({
+        data: {
+          shopId,
+          unitId: dto.unitId,
+          barcode: dto.barcode || null,
+          productName: dto.productName,
+          costPrice: Number.isFinite(dto.costPrice) ? dto.costPrice : 0,
+          salePrice: dto.salePrice,
+          stockQuantity: Number.isFinite(dto.stockQuantity) ? dto.stockQuantity : 0,
+        },
+        include: { unit: true },
+      });
+      return this.serializeProduct(created);
+    } catch (err: any) {
+      // P2002 = Unique constraint failed (e.g. duplicate barcode)
+      if (err?.code === 'P2002') {
+        throw new BadRequestException(
+          'Bu barkod zaten başka bir ürüne ait. Farklı bir barkod girin veya barkod alanını boş bırakın.',
+        );
+      }
+      throw new BadRequestException(err?.message ?? 'Ürün kaydedilemedi.');
+    }
   }
 
   /**
@@ -139,21 +149,30 @@ export class ProductsService {
       }
     }
 
-    const updated = await this.prisma.product.update({
-      where: { id: productId },
-      data: {
-        ...(dto.unitId && { unitId: dto.unitId }),
-        ...(dto.barcode !== undefined && { barcode: dto.barcode || null }),
-        ...(dto.productName && { productName: dto.productName }),
-        ...(dto.costPrice !== undefined && { costPrice: dto.costPrice }),
-        ...(dto.salePrice !== undefined && { salePrice: dto.salePrice }),
-        ...(dto.stockQuantity !== undefined && {
-          stockQuantity: dto.stockQuantity,
-        }),
-      },
-      include: { unit: true },
-    });
-    return this.serializeProduct(updated);
+    try {
+      const updated = await this.prisma.product.update({
+        where: { id: productId },
+        data: {
+          ...(dto.unitId && { unitId: dto.unitId }),
+          ...(dto.barcode !== undefined && { barcode: dto.barcode || null }),
+          ...(dto.productName && { productName: dto.productName }),
+          ...(dto.costPrice !== undefined && { costPrice: Number.isFinite(dto.costPrice) ? dto.costPrice : 0 }),
+          ...(dto.salePrice !== undefined && { salePrice: dto.salePrice }),
+          ...(dto.stockQuantity !== undefined && {
+            stockQuantity: Number.isFinite(dto.stockQuantity) ? dto.stockQuantity : 0,
+          }),
+        },
+        include: { unit: true },
+      });
+      return this.serializeProduct(updated);
+    } catch (err: any) {
+      if (err?.code === 'P2002') {
+        throw new BadRequestException(
+          'Bu barkod zaten başka bir ürüne ait. Farklı bir barkod girin veya barkod alanını boş bırakın.',
+        );
+      }
+      throw new BadRequestException(err?.message ?? 'Ürün güncellenemedi.');
+    }
   }
 
   /**
