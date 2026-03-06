@@ -59,6 +59,18 @@ export class SalesController {
     return this.salesService.getDailySummary(shopId, today);
   }
 
+  // OWNER only — per-product profit report
+  @Roles('OWNER')
+  @Get('profit-report')
+  getProfitReport(
+    @Param('shopId', ParseIntPipe) shopId: number,
+    @Query('from') from: string,
+    @Query('to') to: string,
+  ) {
+    const today = new Date().toISOString().split('T')[0];
+    return this.salesService.getProfitReport(shopId, from || today, to || today);
+  }
+
   // OWNER only — receipt details are financial records
   @Roles('OWNER')
   @Get(':id')

@@ -247,6 +247,76 @@ export class SalesService {
    * @param {string} date - The date in "YYYY-MM-DD" format.
    * @returns {Promise<Object>} Total sales amount and transaction count.
    */
+  /**
+   * @function getProfitReport
+   * @description Calculates per-product profit for a date range.
+   * Profit = (priceAtSale - costPrice) × quantity sold
+   * Groups by product and sums up total revenue, cost, profit.
+   */
+  async getProfitReport(shopId: number, from: string, to: string) {
+    const start = new Date(`${from}T00:00:00.000Z`);
+    const end   = new Date(`${to}T23:59:59.999Z`);
+
+    const items = await this.prisma.salesItem.findMany({
+      where: { transaction: { shopId, createdAt: { gte: start, lte: end } } },
+      include: { product: { select: { id: true, productName: true, costPrice: true, unit: { select: { unitName: true } } } } },
+    });
+
+    // Aggregate per product
+    const map = new Map<number, { productName: string; unitName: string; qtySold: Decimal; revenue: Decimal; cost: Decimal }>();
+
+    for (const item of items) {
+      const qty         = new Decimal(item.quantity.toString());
+      const salePrice   = new Decimal(item.priceAtSale.toString());
+      const costPrice   = new Decimal(item.product.costPrice?.toString() ?? '0');
+      const lineRevenue = qty.mul(salePrice);
+      const lineCost    = qty.mul(costPrice);
+
+      const existing = map.get(item.productId);
+      if (existing) {
+        existing.qtySold  = existing.qtySold.add(qty);
+        existing.revenue  = existing.revenue.add(lineRevenue);
+        existing.cost     = existing.cost.add(lineCost);
+      } else {
+        map.set(item.productId, {
+          productName: item.product.productName,
+          unitName: item.product.unit?.unitName ?? '',
+          qtySold:  qty,
+          revenue:  lineRevenue,
+          cost:     lineCost,
+        });
+      }
+    }
+
+    let totalRevenue = new Decimal(0);
+    let totalCost    = new Decimal(0);
+    let totalProfit  = new Decimal(0);
+
+    const products = Array.from(map.entries()).map(([productId, v]) => {
+      const profit = v.revenue.minus(v.cost);
+      totalRevenue = totalRevenue.add(v.revenue);
+      totalCost    = totalCost.add(v.cost);
+      totalProfit  = totalProfit.add(profit);
+      return {
+        productId,
+        productName: v.productName,
+        unitName:    v.unitName,
+        qtySold:     v.qtySold.toFixed(3),
+        revenue:     v.revenue.toFixed(2),
+        cost:        v.cost.toFixed(2),
+        profit:      profit.toFixed(2),
+      };
+    }).sort((a, b) => parseFloat(b.profit) - parseFloat(a.profit));
+
+    return {
+      from, to,
+      totalRevenue: totalRevenue.toFixed(2),
+      totalCost:    totalCost.toFixed(2),
+      totalProfit:  totalProfit.toFixed(2),
+      products,
+    };
+  }
+
   async getDailySummary(shopId: number, date: string) {
     const startOfDay = new Date(`${date}T00:00:00.000Z`);
     const endOfDay = new Date(`${date}T23:59:59.999Z`);
