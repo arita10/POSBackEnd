@@ -56,9 +56,9 @@ export class ProductsService {
         unitId: dto.unitId,
         barcode: dto.barcode || null,
         productName: dto.productName,
-        costPrice: dto.costPrice || 0,
+        costPrice: Number.isFinite(dto.costPrice) ? dto.costPrice : 0,
         salePrice: dto.salePrice,
-        stockQuantity: dto.stockQuantity || 0,
+        stockQuantity: Number.isFinite(dto.stockQuantity) ? dto.stockQuantity : 0,
       },
       include: { unit: true },
     });
