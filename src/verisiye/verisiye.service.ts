@@ -11,12 +11,12 @@ export class VerisiyeService {
   // ── CUSTOMERS ──────────────────────────────────────────────
 
   async findAllCustomers(shopId: number) {
+    const sid = Number(shopId);
     const customers = await this.prisma.veriSiyeCustomer.findMany({
-      where: { shopId, isActive: true },
+      where: { shopId: sid, isActive: true },
       orderBy: { name: 'asc' },
     });
 
-    // Attach computed balance to each customer
     const withBalances = await Promise.all(
       customers.map((c) => this.attachBalance(c)),
     );
@@ -24,8 +24,9 @@ export class VerisiyeService {
   }
 
   async findOneCustomer(shopId: number, customerId: number) {
+    const sid = Number(shopId);
     const customer = await this.prisma.veriSiyeCustomer.findFirst({
-      where: { id: customerId, shopId },
+      where: { id: Number(customerId), shopId: sid },
     });
     if (!customer) {
       throw new NotFoundException(`Customer ${customerId} not found in shop ${shopId}`);
@@ -34,14 +35,25 @@ export class VerisiyeService {
   }
 
   async createCustomer(shopId: number, dto: CreateCustomerDto) {
+    const sid = Number(shopId);
+
+    // Verify shop exists first to give a clear error
+    const shop = await this.prisma.shop.findUnique({ where: { id: sid } });
+    if (!shop) {
+      throw new BadRequestException(`Shop ${sid} not found`);
+    }
+
     try {
       const customer = await this.prisma.veriSiyeCustomer.create({
-        data: { shopId, name: dto.name, homeNo: dto.homeNo ?? null, telNo: dto.telNo, notes: dto.notes ?? null },
+        data: { shopId: sid, name: dto.name, homeNo: dto.homeNo ?? null, telNo: dto.telNo, notes: dto.notes ?? null },
       });
       return this.attachBalance(customer);
     } catch (err: any) {
       if (err?.code === 'P2002') {
         throw new BadRequestException('Bu telefon numarası zaten kayıtlı.');
+      }
+      if (err?.code === 'P2003') {
+        throw new BadRequestException(`Dükkan bulunamadı (shopId: ${sid}).`);
       }
       throw new BadRequestException(err?.message ?? 'Müşteri kaydedilemedi.');
     }
@@ -51,7 +63,7 @@ export class VerisiyeService {
     await this.findOneCustomer(shopId, customerId);
     try {
       const updated = await this.prisma.veriSiyeCustomer.update({
-        where: { id: customerId },
+        where: { id: Number(customerId) },
         data: {
           ...(dto.name !== undefined && { name: dto.name }),
           ...(dto.homeNo !== undefined && { homeNo: dto.homeNo || null }),
@@ -71,7 +83,7 @@ export class VerisiyeService {
   async deactivateCustomer(shopId: number, customerId: number) {
     await this.findOneCustomer(shopId, customerId);
     return this.prisma.veriSiyeCustomer.update({
-      where: { id: customerId },
+      where: { id: Number(customerId) },
       data: { isActive: false },
     });
   }
@@ -79,11 +91,13 @@ export class VerisiyeService {
   // ── CUSTOMER DETAIL (transactions + payments) ──────────────
 
   async getCustomerDetail(shopId: number, customerId: number) {
-    const customer = await this.findOneCustomer(shopId, customerId);
+    const sid = Number(shopId);
+    const cid = Number(customerId);
+    const customer = await this.findOneCustomer(sid, cid);
 
     const [sales, payments] = await Promise.all([
       this.prisma.salesTransaction.findMany({
-        where: { shopId, customerId, paymentType: 'verisiye' },
+        where: { shopId: sid, customerId: cid, paymentType: 'verisiye' },
         include: {
           items: {
             include: { product: { select: { productName: true, unit: { select: { unitName: true } } } } },
@@ -93,7 +107,7 @@ export class VerisiyeService {
         orderBy: { createdAt: 'desc' },
       }),
       this.prisma.veriSiyePayment.findMany({
-        where: { shopId, customerId },
+        where: { shopId: sid, customerId: cid },
         include: { user: { select: { username: true } } },
         orderBy: { paymentDate: 'desc' },
       }),
@@ -128,7 +142,8 @@ export class VerisiyeService {
   // ── PAYMENTS ───────────────────────────────────────────────
 
   async createPayment(shopId: number, dto: CreatePaymentDto) {
-    await this.findOneCustomer(shopId, dto.customerId);
+    const sid = Number(shopId);
+    await this.findOneCustomer(sid, dto.customerId);
 
     if (!dto.amount || dto.amount <= 0) {
       throw new BadRequestException('Ödeme tutarı sıfırdan büyük olmalıdır.');
@@ -136,11 +151,11 @@ export class VerisiyeService {
 
     const payment = await this.prisma.veriSiyePayment.create({
       data: {
-        shopId,
-        customerId: dto.customerId,
+        shopId: sid,
+        customerId: Number(dto.customerId),
         amount: dto.amount,
         note: dto.note ?? null,
-        recordedBy: dto.recordedBy,
+        recordedBy: Number(dto.recordedBy),
         paymentDate: dto.paymentDate ? new Date(dto.paymentDate) : new Date(),
       },
       include: { user: { select: { username: true } } },
@@ -159,10 +174,6 @@ export class VerisiyeService {
 
   // ── HELPERS ────────────────────────────────────────────────
 
-  /**
-   * Compute balance dynamically:
-   * balance = SUM(verisiye sales) - SUM(payments)
-   */
   private async attachBalance(customer: any) {
     const [salesAgg, paymentsAgg] = await Promise.all([
       this.prisma.salesTransaction.aggregate({
