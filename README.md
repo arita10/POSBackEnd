@@ -1,98 +1,417 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# POS Bakkal SaaS — Backend Documentation
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+**Stack:** NestJS · Prisma ORM v6 · PostgreSQL (Aiven Cloud) · JWT Auth
+**Deployed on:** Render (backend) · Vercel (frontend)
+**GitHub:** https://github.com/arita10/POSBackEnd
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+---
 
-## Description
+## Table of Contents
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+1. [System Overview](#1-system-overview)
+2. [Architecture](#2-architecture)
+3. [Database Schema](#3-database-schema)
+4. [Authentication & Authorization](#4-authentication--authorization)
+5. [API Reference](#5-api-reference)
+6. [Business Logic & Formulas](#6-business-logic--formulas)
+7. [Environment Variables](#7-environment-variables)
+8. [Local Development](#8-local-development)
+9. [Deployment](#9-deployment)
 
-## Project setup
+---
 
-```bash
-$ npm install
+## 1. System Overview
+
+A multi-tenant SaaS Point-of-Sale backend for Turkish grocery shops (Bakkal).
+
+**One backend — many shops.** Each shop is completely isolated by `shopId`. No shop can see another shop's data.
+
+**Two actor types:**
+- **SaaS Admin (you)** — creates shops and owner accounts via `/admin` routes using a secret key
+- **Shop Owner / Staff** — logs in with JWT, manages their own shop's data
+
+---
+
+## 2. Architecture
+
+```
+src/
+├── admin/            → SaaS admin routes (create shops, reset passwords)
+├── auth/             → JWT login, guards, decorators
+├── shops/            → Shop management
+├── users/            → User management per shop
+├── permissions/      → Staff permission flags per user
+├── product-units/    → Units of measure (Adet, KG, etc.)
+├── products/         → Product catalog with stock
+├── price-comparison/ → Competitor price tracking
+├── sales/            → Sales transactions + stock deduction
+├── expenses/         → Business expenses (kasa/devir/kart gider)
+├── vendors/          → Reusable vendor list
+├── daily-balance/    → End-of-day accounting and reports
+├── verisiye/         → Credit customer management
+└── prisma/           → PrismaService (global)
 ```
 
-## Compile and run the project
+**Key design decisions:**
+- `PrismaModule` is `@Global()` — no need to import in every module
+- `JwtAuthGuard` + `RolesGuard` applied globally via `APP_GUARD`
+- `@Public()` decorator bypasses JWT (used on login + admin routes)
+- `@Roles('OWNER')` / `@Roles('OWNER', 'STAFF')` per route/controller
+- All URLs are nested under `/shops/:shopId/...` to enforce tenancy
 
-```bash
-# development
-$ npm run start
+---
 
-# watch mode
-$ npm run start:dev
+## 3. Database Schema
 
-# production mode
-$ npm run start:prod
+### Tables Overview
+
+| Table | Description |
+|-------|-------------|
+| `shops` | One row per tenant shop |
+| `users` | Owner + staff per shop |
+| `permissions` | Extra flags for staff (canManageStock, canViewReports) |
+| `product_units` | Units: Adet, KG, Litre, etc. |
+| `products` | Product catalog with stock, cost, sale price |
+| `product_price_comparison` | Competitor prices per product |
+| `sales_transactions` | Receipt header (cash or credit) |
+| `sales_items` | Line items on each receipt |
+| `expense_items` | Business expenses by type |
+| `vendors` | Reusable vendor names per shop |
+| `daily_balance_records` | Closed end-of-day accounting records |
+| `verisiye_customers` | Credit customers per shop |
+| `verisiye_payments` | Payments made by credit customers |
+
+### Key Column Notes
+
+**products**
+- `cost_price` — purchase price (used for profit reports)
+- `sale_price` — selling price
+- `stock_quantity` — auto-decremented on every sale
+- `expiry_date` — optional, for perishables
+
+**sales_transactions**
+- `payment_type` — `"nakit"` (cash) or `"verisiye"` (credit)
+- `customer_id` — set only when `payment_type = "verisiye"`
+
+**expense_items**
+- `expense_type` — `"kasa_gider"` | `"devir_gider"` | `"kart_gider"`
+- `vendor_id` — optional link to vendors table
+
+**daily_balance_records**
+- Stores the result of the end-of-day close with all formula outputs
+
+**verisiye_customers**
+- `is_active` — soft delete flag (history is preserved)
+- `tel_no` — unique per shop, used as natural customer key
+
+---
+
+## 4. Authentication & Authorization
+
+### Login Flow
+
+```
+POST /auth/login
+Body: { "shopId": 1, "username": "ali", "password": "Ali123!" }
+
+Response: { "accessToken": "eyJ..." }
 ```
 
-## Run tests
-
-```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
+All subsequent requests must include:
+```
+Authorization: Bearer <accessToken>
 ```
 
-## Deployment
+### Role System
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+| Role | Access |
+|------|--------|
+| `OWNER` | Full access to all shop routes |
+| `STAFF` | Can create sales, view/add verisiye customers and payments |
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+### Admin Routes
 
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+Protected by `x-admin-key` header (not JWT). Value set in `.env` as `ADMIN_KEY`.
+
+```
+x-admin-key: your-secret-admin-key
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+---
 
-## Resources
+## 5. API Reference
 
-Check out a few resources that may come in handy when working with NestJS:
+### AUTH
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+| Method | Endpoint | Auth | Body |
+|--------|----------|------|------|
+| POST | `/auth/login` | None | `{ shopId, username, password }` |
 
-## Support
+---
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+### ADMIN
 
-## Stay in touch
+| Method | Endpoint | Auth | Body |
+|--------|----------|------|------|
+| POST | `/admin/shops` | x-admin-key | `{ shopName, ownerUsername, ownerPassword }` |
+| GET | `/admin/shops` | x-admin-key | — |
+| POST | `/admin/shops/:shopId/staff` | x-admin-key | `{ username, password }` |
+| POST | `/admin/users/:userId/reset-password` | x-admin-key | `{ newPassword }` |
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+---
 
-## License
+### USERS — `/shops/:shopId/users` (OWNER only)
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+| Method | Endpoint | Body |
+|--------|----------|------|
+| POST | `/shops/:shopId/users` | `{ username, password, role? }` |
+| GET | `/shops/:shopId/users` | — |
+| GET | `/shops/:shopId/users/:id` | — |
+| PUT | `/shops/:shopId/users/:id` | `{ username?, password?, role? }` |
+| DELETE | `/shops/:shopId/users/:id` | — |
+
+---
+
+### PERMISSIONS — `/shops/:shopId/users/:userId/permissions` (OWNER only)
+
+| Method | Endpoint | Body |
+|--------|----------|------|
+| GET | `/shops/:shopId/users/:userId/permissions` | — |
+| PUT | `/shops/:shopId/users/:userId/permissions` | `{ canManageStock?, canViewReports? }` |
+
+---
+
+### PRODUCT UNITS — `/shops/:shopId/product-units` (OWNER only)
+
+| Method | Endpoint | Body |
+|--------|----------|------|
+| POST | `/shops/:shopId/product-units` | `{ unitName }` |
+| GET | `/shops/:shopId/product-units` | — |
+| DELETE | `/shops/:shopId/product-units/:id` | — |
+
+> **Note:** Two default units (Adet, KG) are created automatically with every new shop.
+
+---
+
+### PRODUCTS — `/shops/:shopId/products` (OWNER only)
+
+| Method | Endpoint | Body |
+|--------|----------|------|
+| POST | `/shops/:shopId/products` | `{ unitId, productName, salePrice, costPrice?, barcode?, stockQuantity?, expiryDate? }` |
+| GET | `/shops/:shopId/products` | — |
+| GET | `/shops/:shopId/products/:id` | — |
+| PUT | `/shops/:shopId/products/:id` | `{ productName?, salePrice?, costPrice?, stockQuantity?, barcode?, expiryDate? }` |
+| DELETE | `/shops/:shopId/products/:id` | — |
+
+---
+
+### VENDORS — `/shops/:shopId/vendors` (OWNER only)
+
+| Method | Endpoint | Body |
+|--------|----------|------|
+| GET | `/shops/:shopId/vendors` | — |
+| POST | `/shops/:shopId/vendors` | `{ vendorName }` |
+| DELETE | `/shops/:shopId/vendors/:id` | — |
+
+---
+
+### SALES — `/shops/:shopId/sales`
+
+| Method | Endpoint | Auth | Body |
+|--------|----------|------|------|
+| POST | `/shops/:shopId/sales` | OWNER + STAFF | `{ userId, items: [{productId, quantity}], paymentType?, customerId? }` |
+| GET | `/shops/:shopId/sales` | OWNER | — |
+| GET | `/shops/:shopId/sales/daily?date=YYYY-MM-DD` | OWNER | — |
+| GET | `/shops/:shopId/sales/:id` | OWNER | — |
+
+`paymentType`: `"nakit"` (default) or `"verisiye"` (requires `customerId`)
+
+On every sale: stock is automatically deducted from each product.
+
+---
+
+### EXPENSES — `/shops/:shopId/expenses` (OWNER only)
+
+| Method | Endpoint | Body |
+|--------|----------|------|
+| POST | `/shops/:shopId/expenses` | `{ vendorName, itemAmount, expenseType, transactionDate?, vendorId? }` |
+| GET | `/shops/:shopId/expenses?date=YYYY-MM-DD` | — |
+| GET | `/shops/:shopId/expenses/:id` | — |
+| PUT | `/shops/:shopId/expenses/:id` | `{ vendorName?, itemAmount?, expenseType?, transactionDate?, vendorId? }` |
+| DELETE | `/shops/:shopId/expenses/:id` | — |
+
+**expenseType values:**
+- `"kasa_gider"` — cash expense paid from the register
+- `"devir_gider"` — carry-over deduction (reduces devir balance)
+- `"kart_gider"` — card/bank expense
+
+---
+
+### DAILY BALANCE — `/shops/:shopId/daily-balance` (OWNER only)
+
+| Method | Endpoint | Body / Query |
+|--------|----------|------|
+| GET | `/shops/:shopId/daily-balance/preview?date=YYYY-MM-DD&dunDevir=0` | — |
+| POST | `/shops/:shopId/daily-balance/close` | `{ recordDate, dunDevir?, kasaNakit?, krediler?, verisiye? }` |
+| GET | `/shops/:shopId/daily-balance` | — |
+| GET | `/shops/:shopId/daily-balance/:id` | — |
+| GET | `/shops/:shopId/daily-balance/report?period=daily&date=YYYY-MM-DD` | — |
+
+`period`: `"daily"` | `"weekly"` | `"monthly"`
+
+---
+
+### VERİSİYE — `/shops/:shopId/verisiye`
+
+| Method | Endpoint | Auth | Body |
+|--------|----------|------|------|
+| GET | `/shops/:shopId/verisiye/customers` | OWNER + STAFF | — |
+| POST | `/shops/:shopId/verisiye/customers` | OWNER + STAFF | `{ name, telNo, homeNo?, notes? }` |
+| GET | `/shops/:shopId/verisiye/customers/:id` | OWNER + STAFF | — |
+| GET | `/shops/:shopId/verisiye/customers/:id/detail` | OWNER + STAFF | — |
+| PATCH | `/shops/:shopId/verisiye/customers/:id` | OWNER | `{ name?, telNo?, homeNo?, notes? }` |
+| DELETE | `/shops/:shopId/verisiye/customers/:id` | OWNER | — (soft delete) |
+| POST | `/shops/:shopId/verisiye/payments` | OWNER + STAFF | `{ customerId, amount, recordedBy, paymentDate?, note? }` |
+
+---
+
+### PRICE COMPARISON — `/shops/:shopId/price-comparison` (OWNER only)
+
+| Method | Endpoint | Body |
+|--------|----------|------|
+| GET | `/shops/:shopId/price-comparison` | — |
+| POST | `/shops/:shopId/price-comparison` | `{ productId, competitorName, competitorPrice }` |
+
+---
+
+## 6. Business Logic & Formulas
+
+### Daily Balance Formulas
+
+```
+Formula 1 — Devir Kalan:
+  devirKalan = dunDevir - totalDevirGider
+
+Formula 2 — Beklenen Kasa (Expected Cash):
+  incomeLeft = totalSystemSelling - totalKasaGider - totalKartGider + devirKalan
+
+Formula 3 — Fark (Difference):
+  fark = (kasaNakit + krediler + verisiye) - incomeLeft
+```
+
+**Field meanings:**
+- `dunDevir` — yesterday's carry-over balance (entered manually by owner)
+- `totalSystemSelling` — sum of all sales recorded in the system for the day
+- `totalKasaGider` — cash expenses paid out of the register
+- `totalDevirGider` — carry-over deductions
+- `totalKartGider` — card/bank expenses
+- `kasaNakit` — actual cash counted in the drawer
+- `krediler` — credit card total
+- `verisiye` — credit sales total
+
+### Verisiye (Credit) Balance
+
+```
+customerBalance = SUM(sales where paymentType='verisiye') - SUM(payments made)
+```
+
+Balance is computed dynamically — not stored in the DB.
+
+### Stock Deduction
+
+On every sale, `stockQuantity` is decremented for each product inside a DB transaction. If any product has insufficient stock, the entire sale is rejected.
+
+### Profit Report
+
+```
+profit per product = (quantity sold × salePrice) - (quantity sold × costPrice)
+```
+
+Available via `GET /shops/:shopId/sales/daily?date=` or the profit report endpoint.
+
+---
+
+## 7. Environment Variables
+
+Create a `.env` file in the root:
+
+```env
+DATABASE_URL="postgresql://user:password@host:port/dbname?sslmode=require"
+JWT_SECRET="your-strong-jwt-secret"
+ADMIN_KEY="your-strong-admin-key"
+PORT=3000
+```
+
+**On Render:** set these in the Environment tab of your service (not in the file).
+
+---
+
+## 8. Local Development
+
+```bash
+# Install dependencies
+npm install
+
+# Generate Prisma client
+npx prisma generate
+
+# Apply DB migrations
+npx prisma migrate dev
+
+# Start in watch mode
+npm run start:dev
+```
+
+Server runs at `http://localhost:3000` by default.
+
+**View DB in browser:**
+```bash
+npx prisma studio
+```
+
+---
+
+## 9. Deployment
+
+### Render Configuration
+
+| Setting | Value |
+|---------|-------|
+| Build Command | `npm install && npm run build` |
+| Start Command | `npm run start:prod` |
+| Node Version | 20+ |
+
+> `npm run build` runs `prisma generate && nest build` — this ensures the Prisma client is always regenerated from the current schema on every deploy.
+
+### Deploy Steps
+
+1. Push code to `main` branch on GitHub
+2. Render auto-detects the push and rebuilds
+3. Or: Render dashboard → Manual Deploy → Deploy latest commit
+
+### After Schema Changes
+
+When you change `prisma/schema.prisma`:
+
+```bash
+# Run locally first to apply changes to DB
+npx prisma migrate dev --name "describe_your_change"
+
+# Then commit and push — Render will regenerate the client automatically
+git add prisma/
+git commit -m "feat: describe schema change"
+git push
+```
+
+---
+
+## Appendix — Common Errors
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `Property 'xyz' does not exist on type` | Prisma client not regenerated after schema change | Run `npx prisma generate` or push to trigger Render build |
+| `P1017 Server has closed connection` | Aiven idle timeout | Retry the command — it reconnects automatically |
+| `P2002 Unique constraint failed` | Duplicate value (e.g. same username, same telNo) | Use a different value |
+| `UnknownExportException` | Wrong export in a NestJS module | Export the module, not the service (e.g. `exports: [JwtModule]`) |
+| `401 Unauthorized` | Missing or expired JWT | Login again to get a fresh `accessToken` |
+| `403 Forbidden` | Route requires OWNER role, logged in as STAFF | Login as the owner account |
