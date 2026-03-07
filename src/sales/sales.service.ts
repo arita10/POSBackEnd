@@ -8,336 +8,137 @@ import { PrismaService } from '../prisma/prisma.service';
 import { Decimal } from '@prisma/client/runtime/library';
 import { CreateSaleDto } from './dto/create-sale.dto';
 
-/**
- * @class SalesService
- * @description Handles all business logic for sales transactions.
- *
- * ╔══════════════════════════════════════════════════════════════╗
- * ║  KEY CONCEPT: Prisma Interactive Transactions ($transaction) ║
- * ║                                                              ║
- * ║  When recording a sale, ALL of these must succeed together  ║
- * ║  or ALL must fail (rollback). We never want:                ║
- * ║    - Stock deducted but transaction not saved               ║
- * ║    - Transaction saved but stock not deducted               ║
- * ║                                                              ║
- * ║  Prisma's $transaction() wraps all DB operations in a       ║
- * ║  single atomic SQL transaction. If ANY step fails, the      ║
- * ║  entire sale is rolled back automatically.                  ║
- * ╚══════════════════════════════════════════════════════════════╝
- */
 @Injectable()
 export class SalesService {
   constructor(private readonly prisma: PrismaService) {}
 
-  /**
-   * @function create
-   * @description Records a complete sale with all items atomically.
-   *
-   * STEP-BY-STEP PROCESS:
-   *   1. Validate all products exist in this shop
-   *   2. Check all products have sufficient stock
-   *   3. Calculate total price from current product prices (server-side)
-   *   4. In ONE atomic transaction:
-   *      a. Create the SalesTransaction (header)
-   *      b. Create each SalesItem (detail) with price snapshot
-   *      c. Deduct stock from each product
-   *
-   * WHY calculate price server-side?
-   * The client could send a fake total price. By calculating on the server
-   * from the current product.salePrice, we prevent price manipulation.
-   *
-   * @param {number} shopId - The shop making this sale.
-   * @param {CreateSaleDto} dto - { userId, items: [{productId, quantity}] }
-   * @returns {Promise<SalesTransaction>} The completed transaction with items.
-   * @throws {BadRequestException} If items array is empty.
-   * @throws {NotFoundException} If any product not found in this shop.
-   * @throws {BadRequestException} If any product has insufficient stock.
-   */
   async create(shopId: number, dto: CreateSaleDto) {
-    if (!dto.userId) {
-      throw new BadRequestException('userId is required');
-    }
-    if (!dto.items || dto.items.length === 0) {
-      throw new BadRequestException('A sale must have at least one item');
+    if (!dto.userId) throw new BadRequestException('userId is required');
+    if (!dto.items || dto.items.length === 0) throw new BadRequestException('A sale must have at least one item');
+
+    const paymentType = dto.paymentType === 'verisiye' ? 'verisiye' : 'nakit';
+    if (paymentType === 'verisiye' && !dto.customerId) {
+      throw new BadRequestException('Verisiye satışı için müşteri seçilmesi gerekiyor.');
     }
 
-    // ── STEP 1: Load all products in a single query (efficient) ──
     const productIds = dto.items.map((item) => item.productId);
-    const products = await this.prisma.product.findMany({
-      where: { id: { in: productIds }, shopId },
-    });
+    const products = await this.prisma.product.findMany({ where: { id: { in: productIds }, shopId } });
 
-    // Check every requested product was found in this shop
-    if (products.length !== productIds.length) {
-      throw new NotFoundException(
-        'One or more products not found in this shop',
-      );
-    }
+    if (products.length !== productIds.length) throw new NotFoundException('One or more products not found in this shop');
 
-    // Create a map for O(1) lookup: { productId → product }
     const productMap = new Map(products.map((p) => [p.id, p]));
-
-    // ── STEP 2: Validate stock and calculate total ──
     let totalPrice = new Decimal(0);
 
     for (const item of dto.items) {
       const product = productMap.get(item.productId)!;
       const qty = new Decimal(item.quantity);
-
-      // Check: is there enough stock?
       if (new Decimal(product.stockQuantity).lessThan(qty)) {
-        throw new BadRequestException(
-          `Not enough stock for "${product.productName}". ` +
-            `Available: ${product.stockQuantity}, Requested: ${qty}`,
-        );
+        throw new BadRequestException(`Not enough stock for "${product.productName}". Available: ${product.stockQuantity}, Requested: ${qty}`);
       }
-
-      // Price for this line = quantity × salePrice
-      // e.g., 3 × 25.50 = 76.50 TL
-      const lineTotal = qty.mul(new Decimal(product.salePrice.toString()));
-      totalPrice = totalPrice.add(lineTotal);
+      totalPrice = totalPrice.add(qty.mul(new Decimal(product.salePrice.toString())));
     }
 
-    // ── STEP 3: Execute everything atomically ──
-    // If the server crashes mid-way, nothing is saved. No partial sales!
     try {
-    return await this.prisma.$transaction(async (tx) => {
-      // 3a. Create the SalesTransaction header
-      const transaction = await tx.salesTransaction.create({
-        data: {
-          shopId,
-          userId: dto.userId,
-          totalPrice,
-        },
-      });
-
-      // 3b. Create each SalesItem AND deduct stock simultaneously
-      for (const item of dto.items) {
-        const product = productMap.get(item.productId)!;
-
-        // Create the detail row (price snapshot preserved!)
-        await tx.salesItem.create({
-          data: {
-            transactionId: transaction.id,
-            productId: item.productId,
-            quantity: item.quantity,
-            priceAtSale: product.salePrice, // ← snapshot at time of sale
-          },
+      return await this.prisma.$transaction(async (tx) => {
+        const transaction = await tx.salesTransaction.create({
+          data: { shopId, userId: dto.userId, totalPrice, paymentType, customerId: paymentType === 'verisiye' ? (dto.customerId ?? null) : null },
         });
 
-        // Deduct stock atomically
-        await tx.product.update({
-          where: { id: item.productId },
-          data: { stockQuantity: { decrement: item.quantity } },
+        for (const item of dto.items) {
+          const product = productMap.get(item.productId)!;
+          await tx.salesItem.create({ data: { transactionId: transaction.id, productId: item.productId, quantity: item.quantity, priceAtSale: product.salePrice } });
+          await tx.product.update({ where: { id: item.productId }, data: { stockQuantity: { decrement: item.quantity } } });
+        }
+
+        const result = await tx.salesTransaction.findUnique({
+          where: { id: transaction.id },
+          include: { user: { select: { id: true, username: true } }, items: { include: { product: { select: { id: true, productName: true, unit: true } } } } },
         });
-      }
-
-      // 3c. Return the full transaction with items and product names
-      const result = await tx.salesTransaction.findUnique({
-        where: { id: transaction.id },
-        include: {
-          user: { select: { id: true, username: true } },
-          items: {
-            include: {
-              product: { select: { id: true, productName: true, unit: true } },
-            },
-          },
-        },
+        return this.mapTransaction(result);
       });
-
-      // Map to frontend-friendly shape (totalAmount, saleId, lineTotal)
-      return this.mapTransaction(result);
-    });
     } catch (err: any) {
-      // Surface actual Prisma/DB error to the client instead of generic 500
+      if (err?.status) throw err;
       throw new InternalServerErrorException(err?.message ?? 'Sale creation failed');
     }
   }
 
-  /** Map a raw Prisma SalesTransaction to the frontend Sale shape. */
   private mapTransaction(t: any) {
     if (!t) return null;
     return {
-      id: t.id,
-      shopId: t.shopId,
-      userId: t.userId,
+      id: t.id, shopId: t.shopId, userId: t.userId,
       totalAmount: t.totalPrice?.toString() ?? '0',
+      paymentType: t.paymentType ?? 'nakit',
+      customerId: t.customerId ?? null,
       createdAt: t.createdAt?.toISOString(),
       items: (t.items ?? []).map((item: any) => ({
-        id: item.id,
-        saleId: item.transactionId,
-        productId: item.productId,
+        id: item.id, saleId: item.transactionId, productId: item.productId,
         productName: item.product?.productName ?? '',
         quantity: item.quantity?.toString() ?? '0',
         priceAtSale: item.priceAtSale?.toString() ?? '0',
-        lineTotal: (
-          parseFloat(item.quantity?.toString() ?? '0') *
-          parseFloat(item.priceAtSale?.toString() ?? '0')
-        ).toFixed(2),
+        lineTotal: (parseFloat(item.quantity?.toString() ?? '0') * parseFloat(item.priceAtSale?.toString() ?? '0')).toFixed(2),
         unit: item.product?.unit ?? null,
       })),
     };
   }
 
-  /**
-   * @function findAllByShop
-   * @description Lists all sales transactions for a shop.
-   * TENANCY: Only returns transactions WHERE shopId matches.
-   * @param {number} shopId - The shop to list sales for.
-   * @returns {Promise<SalesTransaction[]>} Array of transactions with totals.
-   */
   async findAllByShop(shopId: number) {
     const rows = await this.prisma.salesTransaction.findMany({
       where: { shopId },
-      include: {
-        user: { select: { id: true, username: true } },
-        items: {
-          include: {
-            product: { select: { id: true, productName: true, unit: true } },
-          },
-        },
-      },
+      include: { user: { select: { id: true, username: true } }, items: { include: { product: { select: { id: true, productName: true, unit: true } } } } },
       orderBy: { createdAt: 'desc' },
     });
     return rows.map((t) => this.mapTransaction(t));
   }
 
-  /**
-   * @function findOne
-   * @description Retrieves a single sale with all its items (receipt view).
-   * TENANCY: Both shopId AND transactionId must match.
-   * @param {number} shopId - The shop the transaction must belong to.
-   * @param {number} transactionId - The transaction's unique identifier.
-   * @returns {Promise<SalesTransaction>} Full receipt with all items.
-   * @throws {NotFoundException} If transaction not found in this shop.
-   */
   async findOne(shopId: number, transactionId: number) {
     const transaction = await this.prisma.salesTransaction.findFirst({
       where: { id: transactionId, shopId },
-      include: {
-        user: { select: { id: true, username: true } },
-        items: {
-          include: {
-            product: {
-              select: {
-                id: true,
-                productName: true,
-                unit: { select: { unitName: true } },
-              },
-            },
-          },
-        },
-      },
+      include: { user: { select: { id: true, username: true } }, items: { include: { product: { select: { id: true, productName: true, unit: { select: { unitName: true } } } } } } },
     });
-
-    if (!transaction) {
-      throw new NotFoundException(
-        `Transaction with ID ${transactionId} not found in shop ${shopId}`,
-      );
-    }
-
+    if (!transaction) throw new NotFoundException(`Transaction with ID ${transactionId} not found in shop ${shopId}`);
     return this.mapTransaction(transaction);
   }
 
-  /**
-   * @function getDailySummary
-   * @description Calculates total sales for a specific date.
-   * This feeds into the Daily Balance calculation in Phase 4.
-   * @param {number} shopId - The shop to summarize.
-   * @param {string} date - The date in "YYYY-MM-DD" format.
-   * @returns {Promise<Object>} Total sales amount and transaction count.
-   */
-  /**
-   * @function getProfitReport
-   * @description Calculates per-product profit for a date range.
-   * Profit = (priceAtSale - costPrice) × quantity sold
-   * Groups by product and sums up total revenue, cost, profit.
-   */
   async getProfitReport(shopId: number, from: string, to: string) {
     const start = new Date(`${from}T00:00:00.000Z`);
     const end   = new Date(`${to}T23:59:59.999Z`);
-
     const items = await this.prisma.salesItem.findMany({
       where: { transaction: { shopId, createdAt: { gte: start, lte: end } } },
       include: { product: { select: { id: true, productName: true, costPrice: true, unit: { select: { unitName: true } } } } },
     });
 
-    // Aggregate per product
     const map = new Map<number, { productName: string; unitName: string; qtySold: Decimal; revenue: Decimal; cost: Decimal }>();
-
     for (const item of items) {
-      const qty         = new Decimal(item.quantity.toString());
-      const salePrice   = new Decimal(item.priceAtSale.toString());
-      const costPrice   = new Decimal(item.product.costPrice?.toString() ?? '0');
-      const lineRevenue = qty.mul(salePrice);
-      const lineCost    = qty.mul(costPrice);
-
+      const qty = new Decimal(item.quantity.toString());
+      const salePrice = new Decimal(item.priceAtSale.toString());
+      const costPrice = new Decimal(item.product.costPrice?.toString() ?? '0');
       const existing = map.get(item.productId);
       if (existing) {
-        existing.qtySold  = existing.qtySold.add(qty);
-        existing.revenue  = existing.revenue.add(lineRevenue);
-        existing.cost     = existing.cost.add(lineCost);
+        existing.qtySold = existing.qtySold.add(qty);
+        existing.revenue = existing.revenue.add(qty.mul(salePrice));
+        existing.cost    = existing.cost.add(qty.mul(costPrice));
       } else {
-        map.set(item.productId, {
-          productName: item.product.productName,
-          unitName: item.product.unit?.unitName ?? '',
-          qtySold:  qty,
-          revenue:  lineRevenue,
-          cost:     lineCost,
-        });
+        map.set(item.productId, { productName: item.product.productName, unitName: item.product.unit?.unitName ?? '', qtySold: qty, revenue: qty.mul(salePrice), cost: qty.mul(costPrice) });
       }
     }
 
-    let totalRevenue = new Decimal(0);
-    let totalCost    = new Decimal(0);
-    let totalProfit  = new Decimal(0);
-
+    let totalRevenue = new Decimal(0), totalCost = new Decimal(0), totalProfit = new Decimal(0);
     const products = Array.from(map.entries()).map(([productId, v]) => {
       const profit = v.revenue.minus(v.cost);
       totalRevenue = totalRevenue.add(v.revenue);
       totalCost    = totalCost.add(v.cost);
       totalProfit  = totalProfit.add(profit);
-      return {
-        productId,
-        productName: v.productName,
-        unitName:    v.unitName,
-        qtySold:     v.qtySold.toFixed(3),
-        revenue:     v.revenue.toFixed(2),
-        cost:        v.cost.toFixed(2),
-        profit:      profit.toFixed(2),
-      };
+      return { productId, productName: v.productName, unitName: v.unitName, qtySold: v.qtySold.toFixed(3), revenue: v.revenue.toFixed(2), cost: v.cost.toFixed(2), profit: profit.toFixed(2) };
     }).sort((a, b) => parseFloat(b.profit) - parseFloat(a.profit));
 
-    return {
-      from, to,
-      totalRevenue: totalRevenue.toFixed(2),
-      totalCost:    totalCost.toFixed(2),
-      totalProfit:  totalProfit.toFixed(2),
-      products,
-    };
+    return { from, to, totalRevenue: totalRevenue.toFixed(2), totalCost: totalCost.toFixed(2), totalProfit: totalProfit.toFixed(2), products };
   }
 
   async getDailySummary(shopId: number, date: string) {
     const startOfDay = new Date(`${date}T00:00:00.000Z`);
-    const endOfDay = new Date(`${date}T23:59:59.999Z`);
-
-    const transactions = await this.prisma.salesTransaction.findMany({
-      where: {
-        shopId,
-        createdAt: { gte: startOfDay, lte: endOfDay },
-      },
-      select: { totalPrice: true },
-    });
-
-    const totalSelling = transactions.reduce(
-      (sum, t) => sum.add(new Decimal(t.totalPrice.toString())),
-      new Decimal(0),
-    );
-
-    return {
-      date,
-      transactionCount: transactions.length,
-      totalSales: totalSelling.toFixed(2),
-    };
+    const endOfDay   = new Date(`${date}T23:59:59.999Z`);
+    const transactions = await this.prisma.salesTransaction.findMany({ where: { shopId, createdAt: { gte: startOfDay, lte: endOfDay } }, select: { totalPrice: true } });
+    const totalSelling = transactions.reduce((sum, t) => sum.add(new Decimal(t.totalPrice.toString())), new Decimal(0));
+    return { date, transactionCount: transactions.length, totalSales: totalSelling.toFixed(2) };
   }
 }

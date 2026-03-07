@@ -46,4 +46,10 @@ export class CreateSaleDto {
 
   /** The list of products being sold (minimum 1 item) */
   items: SaleItemDto[];
+
+  /** Payment type: "nakit" (cash) or "verisiye" (credit). Defaults to "nakit". */
+  paymentType?: string;
+
+  /** Required when paymentType is "verisiye". The VeriSiyeCustomer ID. */
+  customerId?: number;
 }

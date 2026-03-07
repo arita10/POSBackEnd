@@ -24,4 +24,7 @@ export class UpdateProductDto {
 
   /** Manually adjust stock quantity (for inventory corrections) */
   stockQuantity?: number;
+
+  /** Optional expiry date (ISO date string YYYY-MM-DD) */
+  expiryDate?: string;
 }

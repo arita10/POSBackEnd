@@ -4,6 +4,7 @@
 // Phase 2: Stock & Inventory (ProductUnits, Products, PriceComparison)
 // Phase 3: Sales & Expenses (SalesTransaction, SalesItem, ExpenseItem, Vendor)
 // Phase 4: Daily Balance (DailyBalanceRecord — Devir, Fark formulas)
+// Phase 5: Verisiye (VeriSiyeCustomer, VeriSiyePayment, credit sales)
 // ============================================================
 
 generator client {
@@ -33,6 +34,8 @@ model Shop {
   expenseItems        ExpenseItem[]
   vendors             Vendor[]
   dailyBalanceRecords DailyBalanceRecord[]
+  verisiyeCustomers   VeriSiyeCustomer[]
+  verisiyePayments    VeriSiyePayment[]
 
   @@map("shops")
 }
@@ -60,6 +63,7 @@ model User {
   shop              Shop               @relation(fields: [shopId], references: [id], onDelete: Cascade)
   permission        Permission?
   salesTransactions SalesTransaction[]
+  verisiyePayments  VeriSiyePayment[]
 
   @@unique([shopId, username])
   @@map("users")
@@ -105,14 +109,15 @@ model ProductUnit {
 // PRODUCT
 // ============================================================
 model Product {
-  id            Int     @id @default(autoincrement())
-  shopId        Int     @map("shop_id")
-  unitId        Int     @map("unit_id")
-  barcode       String? @db.VarChar(50)
-  productName   String  @map("product_name") @db.VarChar(100)
-  costPrice     Decimal @default(0) @map("cost_price") @db.Decimal(10, 2)
-  salePrice     Decimal @map("sale_price") @db.Decimal(10, 2)
-  stockQuantity Decimal @default(0) @map("stock_quantity") @db.Decimal(10, 3)
+  id            Int       @id @default(autoincrement())
+  shopId        Int       @map("shop_id")
+  unitId        Int       @map("unit_id")
+  barcode       String?   @db.VarChar(50)
+  productName   String    @map("product_name") @db.VarChar(100)
+  costPrice     Decimal   @default(0) @map("cost_price") @db.Decimal(10, 2)
+  salePrice     Decimal   @map("sale_price") @db.Decimal(10, 2)
+  stockQuantity Decimal   @default(0) @map("stock_quantity") @db.Decimal(10, 3)
+  expiryDate    DateTime? @map("expiry_date") @db.Date
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -144,17 +149,23 @@ model ProductPriceComparison {
 
 // ============================================================
 // SALES TRANSACTION - Receipt Header
+//
+// paymentType: "nakit" = cash, "verisiye" = credit sale
+// customerId: set when paymentType = "verisiye"
 // ============================================================
 model SalesTransaction {
-  id         Int      @id @default(autoincrement())
-  shopId     Int      @map("shop_id")
-  userId     Int      @map("user_id")
-  totalPrice Decimal  @map("total_price") @db.Decimal(10, 2)
-  createdAt  DateTime @default(now()) @map("created_at")
+  id          Int      @id @default(autoincrement())
+  shopId      Int      @map("shop_id")
+  userId      Int      @map("user_id")
+  totalPrice  Decimal  @map("total_price") @db.Decimal(10, 2)
+  paymentType String   @default("nakit") @map("payment_type") @db.VarChar(20)
+  customerId  Int?     @map("customer_id")
+  createdAt   DateTime @default(now()) @map("created_at")
 
-  shop  Shop        @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  user  User        @relation(fields: [userId], references: [id])
-  items SalesItem[]
+  shop     Shop              @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  user     User              @relation(fields: [userId], references: [id])
+  items    SalesItem[]
+  customer VeriSiyeCustomer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
 
   @@map("sales_transactions")
 }
@@ -265,4 +276,59 @@ model DailyBalanceRecord {
 
   @@unique([shopId, recordDate])
   @@map("daily_balance_records")
+}
+
+// ============================================================
+// VERISIYE CUSTOMER - Credit Customer per Shop
+//
+// homeNo: used at POS to quickly look up the customer
+// telNo: unique per shop — future portal login key
+// phoneHash: reserved for future customer portal authentication
+// isActive: soft-delete to preserve transaction history
+// @@unique([shopId, telNo]): natural login key for future portal
+// ============================================================
+model VeriSiyeCustomer {
+  id        Int      @id @default(autoincrement())
+  shopId    Int      @map("shop_id")
+  name      String   @db.VarChar(100)
+  homeNo    String?  @map("home_no") @db.VarChar(20)
+  telNo     String   @map("tel_no") @db.VarChar(20)
+  phoneHash String?  @map("phone_hash") @db.VarChar(255)
+  notes     String?  @db.Text
+  isActive  Boolean  @default(true) @map("is_active")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  shop             Shop               @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  salesTransactions SalesTransaction[]
+  payments         VeriSiyePayment[]
+
+  @@unique([shopId, telNo])
+  @@map("verisiye_customers")
+}
+
+// ============================================================
+// VERISIYE PAYMENT - Payments recorded against a credit customer
+//
+// Debt balance is computed dynamically:
+//   balance = SUM(SalesTransaction.totalPrice WHERE customerId = x AND paymentType = 'verisiye')
+//           - SUM(VeriSiyePayment.amount WHERE customerId = x)
+// ============================================================
+model VeriSiyePayment {
+  id          Int      @id @default(autoincrement())
+  shopId      Int      @map("shop_id")
+  customerId  Int      @map("customer_id")
+  amount      Decimal  @db.Decimal(10, 2)
+  note        String?  @db.VarChar(255)
+  recordedBy  Int      @map("recorded_by")
+  paymentDate DateTime @default(now()) @map("payment_date") @db.Date
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  shop     Shop             @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  customer VeriSiyeCustomer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  user     User             @relation(fields: [recordedBy], references: [id])
+
+  @@map("verisiye_payments")
 }

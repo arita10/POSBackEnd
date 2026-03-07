@@ -36,4 +36,7 @@ export class CreateProductDto {
 
   /** Initial stock quantity. Use decimals for KG (e.g. 5.500) */
   stockQuantity?: number;
+
+  /** Optional expiry date for perishable products (ISO date string YYYY-MM-DD) */
+  expiryDate?: string;
 }

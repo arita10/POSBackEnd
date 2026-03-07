@@ -60,6 +60,7 @@ export class ProductsService {
           costPrice: Number.isFinite(dto.costPrice) ? dto.costPrice : 0,
           salePrice: dto.salePrice,
           stockQuantity: Number.isFinite(dto.stockQuantity) ? dto.stockQuantity : 0,
+          expiryDate: dto.expiryDate ? new Date(dto.expiryDate) : null,
         },
         include: { unit: true },
       });
@@ -160,6 +161,9 @@ export class ProductsService {
           ...(dto.salePrice !== undefined && { salePrice: dto.salePrice }),
           ...(dto.stockQuantity !== undefined && {
             stockQuantity: Number.isFinite(dto.stockQuantity) ? dto.stockQuantity : 0,
+          }),
+          ...(dto.expiryDate !== undefined && {
+            expiryDate: dto.expiryDate ? new Date(dto.expiryDate) : null,
           }),
         },
         include: { unit: true },
@@ -273,6 +277,7 @@ export class ProductsService {
       costPrice: cost,
       salePrice: sale,
       stockQuantity: p.stockQuantity?.toString() ?? '0',
+      expiryDate: p.expiryDate ? p.expiryDate.toISOString().slice(0, 10) : null,
       createdAt: p.createdAt?.toISOString(),
       updatedAt: p.updatedAt?.toISOString(),
       unit: p.unit ?? null,
