@@ -9,37 +9,11 @@ import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { AdjustStockDto } from './dto/adjust-stock.dto';
 
-/**
- * @class ProductsService
- * @description Handles all business logic for product and inventory management.
- *
- * ╔══════════════════════════════════════════════════════════════╗
- * ║  TENANCY: Every method receives shopId and filters by it.   ║
- * ║  STOCK MATH: Uses Decimal for precise KG calculations.      ║
- * ╚══════════════════════════════════════════════════════════════╝
- *
- * STOCK PRECISION RULES:
- *   - Adet (piece): whole numbers only → 5.000, 48.000
- *   - KG (weight): up to 3 decimal places → 0.750, 3.500, 10.250
- *   - Prisma returns Decimal objects, not plain numbers
- *   - We use Decimal arithmetic to avoid floating-point errors
- *     (e.g., 0.1 + 0.2 = 0.30000000000000004 in JS, but 0.3 in Decimal)
- */
 @Injectable()
 export class ProductsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  /**
-   * @function create
-   * @description Adds a new product to a shop's inventory.
-   * Validates that the unit exists in this shop before creating.
-   * @param {number} shopId - The shop this product belongs to.
-   * @param {CreateProductDto} dto - Product details.
-   * @returns {Promise<Product>} The newly created product with unit info.
-   * @throws {NotFoundException} If the specified unit doesn't exist in this shop.
-   */
   async create(shopId: number, dto: CreateProductDto) {
-    // Verify the unit belongs to this shop (tenancy check)
     const unit = await this.prisma.productUnit.findFirst({
       where: { id: dto.unitId, shopId },
     });
@@ -66,7 +40,6 @@ export class ProductsService {
       });
       return this.serializeProduct(created);
     } catch (err: any) {
-      // P2002 = Unique constraint failed (e.g. duplicate barcode)
       if (err?.code === 'P2002') {
         throw new BadRequestException(
           'Bu barkod zaten başka bir ürüne ait. Farklı bir barkod girin veya barkod alanını boş bırakın.',
@@ -76,15 +49,6 @@ export class ProductsService {
     }
   }
 
-  /**
-   * @function findAllByShop
-   * @description Lists all products in a shop's inventory.
-   * Includes the unit name so the frontend knows if it's Adet or KG.
-   * Adds a computed `profit` field: salePrice - costPrice per unit.
-   * TENANCY: Only returns products WHERE shopId matches.
-   * @param {number} shopId - The shop to list products for.
-   * @returns {Promise<Product[]>} Array of products with unit info and profit.
-   */
   async findAllByShop(shopId: number) {
     const products = await this.prisma.product.findMany({
       where: { shopId },
@@ -98,15 +62,6 @@ export class ProductsService {
     return products.map((p) => this.serializeProduct(p));
   }
 
-  /**
-   * @function findOne
-   * @description Retrieves a single product by ID, scoped to a shop.
-   * TENANCY: Both shopId AND productId must match.
-   * @param {number} shopId - The shop the product must belong to.
-   * @param {number} productId - The product's unique identifier.
-   * @returns {Promise<Product>} The product with unit and price comparisons.
-   * @throws {NotFoundException} If product not found in this shop.
-   */
   async findOne(shopId: number, productId: number) {
     const product = await this.prisma.product.findFirst({
       where: { id: productId, shopId },
@@ -125,20 +80,16 @@ export class ProductsService {
     return this.serializeProduct(product);
   }
 
-  /**
-   * @function update
-   * @description Updates a product's details (name, price, barcode, etc.)
-   * TENANCY: Verifies the product belongs to the given shopId.
-   * @param {number} shopId - The shop the product must belong to.
-   * @param {number} productId - The product's unique identifier.
-   * @param {UpdateProductDto} dto - Fields to update.
-   * @returns {Promise<Product>} The updated product record.
-   * @throws {NotFoundException} If product not found in this shop.
-   */
-  async update(shopId: number, productId: number, dto: UpdateProductDto) {
-    await this.findOne(shopId, productId);
+  async update(shopId: number, productId: number, dto: UpdateProductDto, changedBy?: number) {
+    const existing = await this.prisma.product.findFirst({
+      where: { id: productId, shopId },
+    });
+    if (!existing) {
+      throw new NotFoundException(
+        `Product with ID ${productId} not found in shop ${shopId}`,
+      );
+    }
 
-    // If changing unit, verify new unit belongs to this shop
     if (dto.unitId) {
       const unit = await this.prisma.productUnit.findFirst({
         where: { id: dto.unitId, shopId },
@@ -149,6 +100,11 @@ export class ProductsService {
         );
       }
     }
+
+    const oldPrice = new Decimal(existing.salePrice.toString());
+    const newPriceChanged =
+      dto.salePrice !== undefined &&
+      !new Decimal(dto.salePrice.toString()).equals(oldPrice);
 
     try {
       const updated = await this.prisma.product.update({
@@ -168,6 +124,22 @@ export class ProductsService {
         },
         include: { unit: true },
       });
+
+      // Log price change and reprice open verisiye if salePrice changed
+      if (newPriceChanged && changedBy) {
+        const newPrice = new Decimal(dto.salePrice!.toString());
+        await this.prisma.productPriceHistory.create({
+          data: {
+            productId,
+            shopId,
+            oldPrice,
+            newPrice,
+            changedBy,
+          },
+        });
+        await this.repriceOpenVerisiye(shopId, productId, newPrice);
+      }
+
       return this.serializeProduct(updated);
     } catch (err: any) {
       if (err?.code === 'P2002') {
@@ -179,31 +151,22 @@ export class ProductsService {
     }
   }
 
-  /**
-   * @function adjustStock
-   * @description Adjusts a product's stock quantity (add or remove).
-   *
-   * BUSINESS LOGIC:
-   *   - "add": New delivery arrived. Stock goes UP.
-   *     Current: 48.000 + Add: 24.000 = New: 72.000
-   *
-   *   - "remove": Damaged goods or manual correction. Stock goes DOWN.
-   *     Current: 10.500 - Remove: 2.750 = New: 7.750
-   *
-   * SAFETY: Cannot reduce stock below zero.
-   *
-   * WHY use Prisma's increment/decrement instead of manual math?
-   *   Because it uses SQL: UPDATE SET stock = stock + 24
-   *   This is ATOMIC — if two people adjust at the same time,
-   *   both changes are applied correctly (no race condition).
-   *
-   * @param {number} shopId - The shop the product must belong to.
-   * @param {number} productId - The product's unique identifier.
-   * @param {AdjustStockDto} dto - { type: "add"|"remove", quantity: number }
-   * @returns {Promise<Product>} The product with updated stock.
-   * @throws {NotFoundException} If product not found in this shop.
-   * @throws {BadRequestException} If removing more stock than available.
-   */
+  async getPriceHistory(shopId: number, productId: number) {
+    await this.findOne(shopId, productId);
+    const rows = await this.prisma.productPriceHistory.findMany({
+      where: { productId, shopId },
+      include: { user: { select: { username: true } } },
+      orderBy: { changedAt: 'desc' },
+    });
+    return rows.map((r) => ({
+      id: r.id,
+      oldPrice: r.oldPrice.toString(),
+      newPrice: r.newPrice.toString(),
+      changedBy: r.user?.username ?? '',
+      changedAt: r.changedAt.toISOString(),
+    }));
+  }
+
   async adjustStock(shopId: number, productId: number, dto: AdjustStockDto) {
     const product = await this.findOne(shopId, productId);
 
@@ -211,7 +174,6 @@ export class ProductsService {
       throw new BadRequestException('Quantity must be a positive number');
     }
 
-    // If removing, check there's enough stock
     if (dto.type === 'remove') {
       const currentStock = new Decimal(product.stockQuantity.toString());
       const removeAmount = new Decimal(dto.quantity);
@@ -223,7 +185,6 @@ export class ProductsService {
       }
     }
 
-    // Use atomic increment/decrement for thread safety
     const updated = await this.prisma.product.update({
       where: { id: productId },
       data: {
@@ -237,15 +198,6 @@ export class ProductsService {
     return this.serializeProduct(updated);
   }
 
-  /**
-   * @function remove
-   * @description Permanently deletes a product from a shop's inventory.
-   * CASCADE will also delete all price comparisons for this product.
-   * @param {number} shopId - The shop the product must belong to.
-   * @param {number} productId - The product's unique identifier.
-   * @returns {Promise<Product>} The deleted product record.
-   * @throws {NotFoundException} If product not found in this shop.
-   */
   async remove(shopId: number, productId: number) {
     await this.findOne(shopId, productId);
 
@@ -263,6 +215,76 @@ export class ProductsService {
       where: { id: productId },
     });
     return this.serializeProduct(deleted);
+  }
+
+  // ── PRIVATE HELPERS ──────────────────────────────────────────
+
+  private async repriceOpenVerisiye(shopId: number, productId: number, newPrice: Decimal) {
+    // Find all verisiye sale items for this product in this shop
+    const items = await this.prisma.salesItem.findMany({
+      where: { productId, transaction: { shopId, paymentType: 'verisiye' } },
+      select: { id: true, transactionId: true, transaction: { select: { customerId: true } } },
+    });
+
+    if (items.length === 0) return;
+
+    const customerIds = [...new Set(
+      items.map((i) => i.transaction.customerId).filter((id): id is number => id !== null),
+    )];
+
+    for (const customerId of customerIds) {
+      // Check if customer has an open balance
+      const [salesAgg, paymentsAgg] = await Promise.all([
+        this.prisma.salesTransaction.aggregate({
+          where: { customerId, paymentType: 'verisiye' },
+          _sum: { totalPrice: true },
+        }),
+        this.prisma.veriSiyePayment.aggregate({
+          where: { customerId },
+          _sum: { amount: true },
+        }),
+      ]);
+
+      const totalDebt = new Decimal(salesAgg._sum.totalPrice?.toString() ?? '0');
+      const totalPaid = new Decimal(paymentsAgg._sum.amount?.toString() ?? '0');
+      const balance = totalDebt.minus(totalPaid);
+
+      if (!balance.gt(0)) continue;
+
+      // Get transaction IDs for this customer that contain this product
+      const txnIds = [...new Set(
+        items
+          .filter((i) => i.transaction.customerId === customerId)
+          .map((i) => i.transactionId),
+      )];
+
+      for (const txnId of txnIds) {
+        // Update priceAtSale for this product in this transaction
+        await this.prisma.salesItem.updateMany({
+          where: { transactionId: txnId, productId },
+          data: { priceAtSale: newPrice },
+        });
+
+        // Recalculate transaction total
+        const allItems = await this.prisma.salesItem.findMany({
+          where: { transactionId: txnId },
+          select: { quantity: true, priceAtSale: true },
+        });
+
+        const newTotal = allItems.reduce(
+          (sum, item) =>
+            sum.plus(
+              new Decimal(item.quantity.toString()).times(new Decimal(item.priceAtSale.toString())),
+            ),
+          new Decimal(0),
+        );
+
+        await this.prisma.salesTransaction.update({
+          where: { id: txnId },
+          data: { totalPrice: newTotal },
+        });
+      }
+    }
   }
 
   private serializeProduct(p: any) {

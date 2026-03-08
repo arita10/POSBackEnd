@@ -5,6 +5,7 @@
 // Phase 3: Sales & Expenses (SalesTransaction, SalesItem, ExpenseItem, Vendor)
 // Phase 4: Daily Balance (DailyBalanceRecord — Devir, Fark formulas)
 // Phase 5: Verisiye (VeriSiyeCustomer, VeriSiyePayment, credit sales)
+// Phase 6: Price History (ProductPriceHistory — tracks salePrice changes)
 // ============================================================
 
 generator client {
@@ -36,6 +37,7 @@ model Shop {
   dailyBalanceRecords DailyBalanceRecord[]
   verisiyeCustomers   VeriSiyeCustomer[]
   verisiyePayments    VeriSiyePayment[]
+  priceHistory        ProductPriceHistory[]
 
   @@map("shops")
 }
@@ -64,6 +66,7 @@ model User {
   permission        Permission?
   salesTransactions SalesTransaction[]
   verisiyePayments  VeriSiyePayment[]
+  priceHistory      ProductPriceHistory[]
 
   @@unique([shopId, username])
   @@map("users")
@@ -126,6 +129,7 @@ model Product {
   unit             ProductUnit              @relation(fields: [unitId], references: [id])
   priceComparisons ProductPriceComparison[]
   salesItems       SalesItem[]
+  priceHistory     ProductPriceHistory[]
 
   @@unique([shopId, barcode])
   @@map("products")
@@ -331,4 +335,26 @@ model VeriSiyePayment {
   user     User             @relation(fields: [recordedBy], references: [id])
 
   @@map("verisiye_payments")
+}
+
+// ============================================================
+// PRODUCT PRICE HISTORY - Log of every salePrice change
+//
+// Inserted whenever product.salePrice is updated.
+// Also triggers repricing of open (unpaid) verisiye transactions.
+// ============================================================
+model ProductPriceHistory {
+  id        Int      @id @default(autoincrement())
+  productId Int      @map("product_id")
+  shopId    Int      @map("shop_id")
+  oldPrice  Decimal  @map("old_price") @db.Decimal(10, 2)
+  newPrice  Decimal  @map("new_price") @db.Decimal(10, 2)
+  changedBy Int      @map("changed_by")
+  changedAt DateTime @default(now()) @map("changed_at")
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  shop    Shop    @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [changedBy], references: [id])
+
+  @@map("product_price_history")
 }

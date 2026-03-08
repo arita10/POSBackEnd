@@ -1,20 +1,25 @@
 import {
-  Controller, Get, Post, Patch, Delete, Body, Param, ParseIntPipe,
+  Controller, Get, Post, Patch, Delete, Body, Param, ParseIntPipe, Req,
 } from '@nestjs/common';
 import { VerisiyeService } from './verisiye.service';
 import { CreateCustomerDto } from './dto/create-customer.dto';
 import { CreatePaymentDto } from './dto/create-payment.dto';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { Public } from '../auth/decorators/public.decorator';
 
 /**
  * Base route: /shops/:shopId/verisiye
  *
- * Customers:
+ * Portal (public login, then customer-scoped):
+ *   POST /shops/:shopId/verisiye/portal/login   → customer login (homeNo + telNo)
+ *   GET  /shops/:shopId/verisiye/portal/me      → customer views their own data
+ *
+ * Customers (shop staff/owner):
  *   GET    /shops/:shopId/verisiye/customers
  *   POST   /shops/:shopId/verisiye/customers
  *   GET    /shops/:shopId/verisiye/customers/:id
  *   PATCH  /shops/:shopId/verisiye/customers/:id
- *   DELETE /shops/:shopId/verisiye/customers/:id  (soft-delete)
+ *   DELETE /shops/:shopId/verisiye/customers/:id
  *   GET    /shops/:shopId/verisiye/customers/:id/detail
  *
  * Payments:
@@ -24,6 +29,27 @@ import { Roles } from '../auth/decorators/roles.decorator';
 @Controller('shops/:shopId/verisiye')
 export class VerisiyeController {
   constructor(private readonly verisiyeService: VerisiyeService) {}
+
+  // ── Portal ──────────────────────────────────────────────────
+
+  @Public()
+  @Post('portal/login')
+  portalLogin(
+    @Param('shopId', ParseIntPipe) shopId: number,
+    @Body() body: { homeNo: string; telNo: string },
+  ) {
+    return this.verisiyeService.portalLogin(shopId, body.homeNo, body.telNo);
+  }
+
+  @Roles('CUSTOMER')
+  @Get('portal/me')
+  getPortalMe(
+    @Param('shopId', ParseIntPipe) shopId: number,
+    @Req() req: any,
+  ) {
+    const customerId: number = req.user?.sub;
+    return this.verisiyeService.getMyPortalData(shopId, customerId);
+  }
 
   // ── Customers ───────────────────────────────────────────────
 

@@ -1,12 +1,16 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, UnauthorizedException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { JwtService } from '@nestjs/jwt';
 import { Decimal } from '@prisma/client/runtime/library';
 import { CreateCustomerDto } from './dto/create-customer.dto';
 import { CreatePaymentDto } from './dto/create-payment.dto';
 
 @Injectable()
 export class VerisiyeService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly jwtService: JwtService,
+  ) {}
 
   // ── CUSTOMERS ──────────────────────────────────────────────
 
@@ -170,6 +174,40 @@ export class VerisiyeService {
       recordedBy: payment.user?.username ?? '',
       createdAt: payment.createdAt.toISOString(),
     };
+  }
+
+  // ── CUSTOMER PORTAL ────────────────────────────────────────
+
+  async portalLogin(shopId: number, homeNo: string, telNo: string) {
+    const sid = Number(shopId);
+    const customer = await this.prisma.veriSiyeCustomer.findFirst({
+      where: { shopId: sid, homeNo, telNo, isActive: true },
+    });
+
+    if (!customer) {
+      throw new UnauthorizedException('Ev numarası veya telefon numarası hatalı.');
+    }
+
+    const payload = {
+      sub: customer.id,
+      shopId: sid,
+      role: 'CUSTOMER',
+      type: 'portal',
+    };
+
+    const accessToken = await this.jwtService.signAsync(payload, {
+      secret: process.env.JWT_SECRET ?? 'fallback-secret',
+      expiresIn: '30d',
+    });
+
+    return {
+      accessToken,
+      customer: { id: customer.id, name: customer.name, homeNo: customer.homeNo, shopId: sid },
+    };
+  }
+
+  async getMyPortalData(shopId: number, customerId: number) {
+    return this.getCustomerDetail(shopId, customerId);
   }
 
   // ── HELPERS ────────────────────────────────────────────────
