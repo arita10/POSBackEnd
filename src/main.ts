@@ -11,7 +11,9 @@ async function bootstrap() {
   const allowedOrigins = rawOrigins === '*' ? '*' : rawOrigins.split(',').map((s) => s.trim());
   app.enableCors({
     origin: allowedOrigins,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true,
   });
 
   await app.listen(process.env.PORT ?? 3333);
