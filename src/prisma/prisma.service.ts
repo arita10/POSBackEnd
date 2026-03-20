@@ -12,12 +12,24 @@ import { PrismaClient } from '@prisma/client';
  *   1. Single database connection pool (not 50 separate connections)
  *   2. Clean startup/shutdown lifecycle
  *   3. Easy to mock in unit tests
+ *
+ * connection_limit=3: Aiven free tier reserves most slots for superuser.
+ * Keeping the pool small prevents P2037 "Too many connections" errors.
  */
 @Injectable()
 export class PrismaService
   extends PrismaClient
   implements OnModuleInit, OnModuleDestroy
 {
+  constructor() {
+    super({
+      datasources: {
+        db: {
+          url: process.env.DATABASE_URL + '?connection_limit=3&pool_timeout=10',
+        },
+      },
+    });
+  }
   /**
    * @description Called automatically when NestJS starts.
    * Opens the database connection pool.
