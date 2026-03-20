@@ -22,10 +22,12 @@ export class PrismaService
   implements OnModuleInit, OnModuleDestroy
 {
   constructor() {
+    const baseUrl = process.env.DATABASE_URL ?? '';
+    const separator = baseUrl.includes('?') ? '&' : '?';
     super({
       datasources: {
         db: {
-          url: process.env.DATABASE_URL + '?connection_limit=3&pool_timeout=10',
+          url: baseUrl + separator + 'connection_limit=3&pool_timeout=10',
         },
       },
     });
