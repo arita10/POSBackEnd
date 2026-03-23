@@ -1,13 +1,12 @@
 import {
   Injectable,
   BadRequestException,
-  NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import * as XLSX from 'xlsx';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const pdfParse = require('pdf-parse');
-import Tesseract from 'tesseract.js';
+import Anthropic from '@anthropic-ai/sdk';
 import { Decimal } from '@prisma/client/runtime/library';
 
 export interface ParsedPriceRow {
@@ -21,6 +20,10 @@ export interface ParsedPriceRow {
 
 @Injectable()
 export class PriceUploadService {
+  private readonly anthropic = new Anthropic({
+    apiKey: process.env.ANTHROPIC_API_KEY,
+  });
+
   constructor(private readonly prisma: PrismaService) {}
 
   /**
@@ -39,8 +42,11 @@ export class PriceUploadService {
       rows = this.parseExcel(file.buffer);
     } else if (ext === 'pdf') {
       rows = await this.parsePdf(file.buffer);
-    } else if (['png', 'jpg', 'jpeg', 'webp', 'bmp'].includes(ext ?? '')) {
-      rows = await this.parseImage(file.buffer);
+    } else if (['png', 'jpg', 'jpeg', 'webp'].includes(ext ?? '')) {
+      const mimeMap: Record<string, 'image/png' | 'image/jpeg' | 'image/webp'> = {
+        png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp',
+      };
+      rows = await this.parseImage(file.buffer, mimeMap[ext!]);
     } else {
       throw new BadRequestException(
         'Desteklenmeyen dosya tipi. Excel (.xlsx/.xls/.csv), PDF veya resim (PNG/JPG) yükleyin.',
@@ -177,11 +183,59 @@ export class PriceUploadService {
   }
 
   /**
-   * Parse image using OCR (Tesseract) and extract barcode/price pairs.
+   * Parse image using Claude Vision API.
+   * Sends the image to Claude with a structured prompt to extract
+   * barcode + price pairs from vendor price sheets (ETI, etc.)
    */
-  private async parseImage(buffer: Buffer): Promise<{ barcode: string; newPrice: number }[]> {
-    const { data: { text } } = await Tesseract.recognize(buffer, 'tur+eng');
-    return this.extractFromText(text);
+  private async parseImage(
+    buffer: Buffer,
+    mimeType: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif',
+  ): Promise<{ barcode: string; newPrice: number }[]> {
+    const base64 = buffer.toString('base64');
+
+    const response = await this.anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 2048,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'image',
+              source: { type: 'base64', media_type: mimeType, data: base64 },
+            },
+            {
+              type: 'text',
+              text: `This is a vendor price list image. Extract ALL product barcodes and their recommended sale prices.
+
+Look for:
+- Barcodes: labeled as "Ürün Barkodu", "Barkod", "EAN", or long numeric codes (8-14 digits) shown under barcode images
+- Prices: labeled as "Öneri Satış Fiyat", "Öneri Satış Fiyatı", "Tavsiye Fiyat", "Liste Fiyat", or similar
+
+Return ONLY a JSON array, no explanation:
+[{"barcode":"8690526024677","price":16.50},{"barcode":"8690526004822","price":16.50}]
+
+If no barcode/price pairs found, return: []`,
+            },
+          ],
+        },
+      ],
+    });
+
+    const text = response.content[0].type === 'text' ? response.content[0].text : '';
+
+    // Extract JSON array from response
+    const jsonMatch = text.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) return [];
+
+    try {
+      const parsed: { barcode: string; price: number }[] = JSON.parse(jsonMatch[0]);
+      return parsed
+        .filter((r) => r.barcode && r.price > 0)
+        .map((r) => ({ barcode: String(r.barcode).trim(), newPrice: Number(r.price) }));
+    } catch {
+      return [];
+    }
   }
 
   /**
