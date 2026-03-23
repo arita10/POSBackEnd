@@ -19,13 +19,14 @@ import { AiPriceAgentModule } from './ai-price-agent/ai-price-agent.module';
 import { AuthModule } from './auth/auth.module';
 import { AdminModule } from './admin/admin.module';
 import { VerisiyeModule } from './verisiye/verisiye.module';
+import { PriceUploadModule } from './price-upload/price-upload.module';
 
 @Module({
   imports: [
     PrismaModule, ShopsModule, UsersModule, PermissionsModule,
     ProductUnitsModule, ProductsModule, PriceComparisonModule,
     SalesModule, ExpensesModule, VendorsModule, DailyBalanceModule,
-    AiPriceAgentModule, AuthModule, AdminModule, VerisiyeModule,
+    AiPriceAgentModule, AuthModule, AdminModule, VerisiyeModule, PriceUploadModule,
   ],
   controllers: [AppController],
   providers: [
