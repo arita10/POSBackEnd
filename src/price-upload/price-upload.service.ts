@@ -186,20 +186,48 @@ export class PriceUploadService {
 
   /**
    * Extract barcode/price pairs from raw text.
-   * Pattern: a long number (8-14 digits = barcode) followed by a decimal price.
+   *
+   * Strategy 1 — ETI/vendor card format:
+   *   Looks for "Ürün Barkodu <barcode>" followed later by
+   *   "Öneri Satış Fiyat <price>" or "Öneri Satış Fiyatı <price>"
+   *
+   * Strategy 2 — generic fallback:
+   *   Barcode (8-14 digits) directly followed by a decimal price on the same line.
    */
   private extractFromText(text: string): { barcode: string; newPrice: number }[] {
     const results: { barcode: string; newPrice: number }[] = [];
-    // Match: <barcode 8-14 digits>  <whitespace or separator>  <price digits.digits>
-    const pattern = /(\d{8,14})\s*[|\t ;,-]?\s*(\d+[.,]\d{1,2})/g;
-    let match: RegExpExecArray | null;
+    const seen = new Set<string>();
 
-    while ((match = pattern.exec(text)) !== null) {
-      const barcode  = match[1].trim();
-      const price    = parseFloat(match[2].replace(',', '.'));
-      if (price > 0) {
+    const addRow = (barcode: string, price: number) => {
+      if (barcode && price > 0 && !seen.has(barcode)) {
+        seen.add(barcode);
         results.push({ barcode, newPrice: price });
       }
+    };
+
+    // Strategy 1: ETI-style card blocks
+    // Each block contains "Ürün Barkodu\n<barcode>" and "Öneri Satış Fiyat\n<price>"
+    const barcodeMatches = [...text.matchAll(/[UÜ]r[uü]n\s+Barkodu\s*[:\n\r]+\s*(\d{8,14})/gi)];
+    const priceMatches   = [...text.matchAll(/[OÖ]neri\s+Sat[iı][sş]\s+Fiyat[iı]?\s*[:\n\r]+\s*(\d+[.,]\d{1,2})/gi)];
+
+    if (barcodeMatches.length > 0 && priceMatches.length > 0) {
+      // Pair each barcode match with the nearest price match that comes after it
+      for (const bm of barcodeMatches) {
+        const bmIdx = bm.index ?? 0;
+        // find closest price match after this barcode
+        const pm = priceMatches.find((p) => (p.index ?? 0) > bmIdx);
+        if (pm) {
+          addRow(bm[1].trim(), parseFloat(pm[1].replace(',', '.')));
+        }
+      }
+      if (results.length > 0) return results;
+    }
+
+    // Strategy 2: generic — barcode + price on same/adjacent line
+    const pattern = /(\d{8,14})\s*[|\t ;,-]?\s*(\d+[.,]\d{1,2})/g;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(text)) !== null) {
+      addRow(match[1].trim(), parseFloat(match[2].replace(',', '.')));
     }
 
     return results;
