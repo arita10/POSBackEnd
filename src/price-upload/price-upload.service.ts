@@ -142,15 +142,16 @@ export class PriceUploadService {
 
     for (const row of json) {
       const keys = Object.keys(row).map((k) => k.toLowerCase().trim());
+      const normalize = (k: string) => k.toLowerCase().replace(/[\s\n\r_]+/g, ' ').trim();
       const barcodeKey = Object.keys(row).find((k) =>
-        ['barcode', 'barkod', 'bar_code', 'upc', 'ean', 'kod', 'code'].includes(k.toLowerCase().trim()),
+        ['barcode', 'barkod', 'bar code', 'upc', 'ean', 'kod', 'code'].includes(normalize(k)),
       );
       const priceKey = Object.keys(row).find((k) =>
         [
-          'price', 'fiyat', 'sale_price', 'satis_fiyati', 'new_price', 'yeni_fiyat',
+          'price', 'fiyat', 'sale price', 'satis fiyati', 'new price', 'yeni fiyat',
           'yeni liste fiyat', 'yeni tavsiye raf fiyat', 'liste fiyat', 'tavsiye raf fiyat',
           'yeni liste fiyatı', 'yeni tavsiye raf fiyatı', 'liste fiyatı', 'tavsiye raf fiyatı',
-        ].includes(k.toLowerCase().trim()),
+        ].includes(normalize(k)),
       );
 
       if (!barcodeKey || !priceKey) continue;
