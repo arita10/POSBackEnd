@@ -141,18 +141,28 @@ export class PriceUploadService {
     const results: { barcode: string; newPrice: number }[] = [];
 
     for (const row of json) {
-      const keys = Object.keys(row).map((k) => k.toLowerCase().trim());
       const normalize = (k: string) => k.toLowerCase().replace(/[\s\n\r_]+/g, ' ').trim();
       const barcodeKey = Object.keys(row).find((k) =>
         ['barcode', 'barkod', 'bar code', 'upc', 'ean', 'kod', 'code'].includes(normalize(k)),
       );
-      const priceKey = Object.keys(row).find((k) =>
-        [
-          'price', 'fiyat', 'sale price', 'satis fiyati', 'new price', 'yeni fiyat',
-          'yeni liste fiyat', 'yeni tavsiye raf fiyat', 'liste fiyat', 'tavsiye raf fiyat',
-          'yeni liste fiyatı', 'yeni tavsiye raf fiyatı', 'liste fiyatı', 'tavsiye raf fiyatı',
-        ].includes(normalize(k)),
-      );
+
+      // Priority order: prefer "yeni tavsiye raf fiyatı" (col K) over earlier columns.
+      // Use findLast so if multiple columns match, we pick the rightmost (last) one.
+      const pricePreference = [
+        'yeni tavsiye raf fiyatı', 'yeni tavsiye raf fiyat',
+        'yeni liste fiyatı', 'yeni liste fiyat',
+        'tavsiye raf fiyatı', 'tavsiye raf fiyat',
+        'liste fiyatı', 'liste fiyat',
+        'new price', 'yeni fiyat',
+        'price', 'fiyat', 'sale price', 'satis fiyati',
+      ];
+      const allKeys = Object.keys(row);
+      // Find by priority: first try each preferred name in order
+      let priceKey: string | undefined;
+      for (const pref of pricePreference) {
+        priceKey = allKeys.find((k) => normalize(k) === pref);
+        if (priceKey) break;
+      }
 
       if (!barcodeKey || !priceKey) continue;
 
